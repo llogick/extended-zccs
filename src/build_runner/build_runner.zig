@@ -28,6 +28,9 @@ const Allocator = std.mem.Allocator;
 
 pub const dependencies = @import("@dependencies");
 
+var self_path: [:0]const u8 = undefined;
+var build_root: [:0]const u8 = undefined;
+
 ///! This is a modified build runner to extract information out of build.zig
 ///! Modified version of lib/build_runner.zig
 pub fn main() !void {
@@ -44,12 +47,12 @@ pub fn main() !void {
 
     const args = try process.argsAlloc(arena);
 
-    // skip my own exe name
-    var arg_idx: usize = 1;
+    var arg_idx: usize = 0;
 
+    self_path = nextArg(args, &arg_idx) orelse unreachable;
     const zig_exe = nextArg(args, &arg_idx) orelse fatal("missing zig compiler path", .{});
     const zig_lib_dir = nextArg(args, &arg_idx) orelse fatal("missing zig lib directory path", .{});
-    const build_root = nextArg(args, &arg_idx) orelse fatal("missing build root directory path", .{});
+    build_root = nextArg(args, &arg_idx) orelse fatal("missing build root directory path", .{});
     const cache_root = nextArg(args, &arg_idx) orelse fatal("missing cache root directory path", .{});
     const global_cache_root = nextArg(args, &arg_idx) orelse fatal("missing global cache root directory path", .{});
 
@@ -978,8 +981,8 @@ const Packages = struct {
         return path_gop_result.found_existing;
     }
 
-    pub fn toPackageList(self: *Packages) ![]BuildConfig.Package {
-        var result: ArrayList(BuildConfig.Package) = .{};
+    pub fn toPackageList(self: *Packages) ![]BuildConfig.NamePathPair {
+        var result: ArrayList(BuildConfig.NamePathPair) = .{};
         errdefer result.deinit(self.allocator);
 
         const Context = struct {
@@ -1006,6 +1009,118 @@ const Packages = struct {
             path_hashmap.deinit(self.allocator);
         }
         self.packages.deinit(self.allocator);
+    }
+};
+
+const roots_info = struct {
+    pub const RootEntry = struct {
+        step: *Step.Compile,
+        mods: []BuildConfig.NamePathPair,
+    };
+
+    pub fn collect(
+        gpa: std.mem.Allocator,
+        build_root_path: [:0]const u8,
+        step: *Step,
+        visited_steps: *std.AutoArrayHashMapUnmanaged(*Step, void),
+        unsorted_roots: *std.ArrayListUnmanaged(RootEntry),
+    ) !void {
+        const gop_result = try visited_steps.getOrPut(gpa, step);
+        if (gop_result.found_existing) return;
+        if (step.cast(Step.Compile)) |compile| {
+            var root_imports: std.ArrayListUnmanaged(BuildConfig.NamePathPair) = .{};
+            // std.debug.print("cstep: {s}\n", .{compile.name});
+
+            var cli_named_modules = try copied_from_zig.CliNamedModules.init(gpa, compile.root_module);
+            for (compile.getCompileDependencies(false)) |dep_compile| {
+                for (dep_compile.root_module.getGraph().modules) |mod| {
+                    if (!(dep_compile == compile)) continue; // !my_responsibility
+                    if (cli_named_modules.modules.getIndex(mod)) |module_cli_index| {
+                        const module_cli_name = cli_named_modules.names.keys()[module_cli_index];
+                        if (mod.root_source_file) |lp| {
+                            var src = lp.getPath2(mod.owner, step);
+                            // std.log.debug("-M{s}={s}\n", .{ module_cli_name, src });
+                            if (!std.fs.path.isAbsolute(src)) src = try std.fs.path.join(gpa, &.{ build_root, src });
+                            try root_imports.append(gpa, .{ .name = module_cli_name, .path = src });
+                        }
+                    }
+                }
+            }
+            try unsorted_roots.append(
+                gpa,
+                .{
+                    .step = compile,
+                    .mods = try root_imports.toOwnedSlice(gpa),
+                },
+            );
+            root_imports.items.len = 0; // clearRetainingCapacity();
+        }
+        for (step.dependencies.items) |dep_step| try collect(
+            gpa,
+            build_root_path,
+            dep_step,
+            visited_steps,
+            unsorted_roots,
+        );
+    }
+
+    pub fn hasPrecedence(dir_path: []const u8, lhs: RootEntry, rhs: RootEntry) bool {
+        if (lhs.mods.len == 0) return false; // C compile steps should be last
+        if (rhs.mods.len == 0) return true; //  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        const lhs_dir_name = std.fs.path.dirname(lhs.mods[0].path).?; // [0] should be 'root'
+        const rhs_dir_name = std.fs.path.dirname(rhs.mods[0].path).?; // [0] should be 'root'
+        if (std.mem.startsWith(u8, lhs_dir_name, dir_path)) {
+            return if (!std.mem.startsWith(u8, rhs_dir_name, dir_path)) true else (lhs.mods.len > rhs.mods.len);
+        }
+        return false;
+    }
+
+    pub fn print(
+        roots_info_slc: *ArrayListManaged(u8),
+        idx: *u32,
+        compile: *Step.Compile,
+    ) !void {
+        if (compile.root_module.root_source_file) |root_source_file| {
+            try roots_info_slc.writer().print(
+                "{}: {s} @ {s}\n",
+                .{ idx.*, compile.name, root_source_file.getPath(compile.root_module.owner) },
+            );
+        }
+        try printIt(
+            roots_info_slc,
+            compile.root_module.import_table,
+        );
+        idx.* += 1;
+    }
+
+    pub fn printIt(
+        roots_info_slc: *ArrayListManaged(u8),
+        it: std.StringArrayHashMapUnmanaged(*std.Build.Module),
+    ) !void {
+        for (it.keys(), it.values()) |name, import| {
+            if (import.root_source_file) |root_source_file| {
+                try roots_info_slc.writer().print(
+                    "   * {s} @ {s}\n",
+                    .{ name, root_source_file.getPath(import.owner) },
+                );
+            }
+            for (import.import_table.keys(), import.import_table.values()) |name2, import2| {
+                if (import2.root_source_file) |root_source_file2| {
+                    try roots_info_slc.writer().print(
+                        "     * {s} @ {s}\n",
+                        .{ name2, root_source_file2.getPath(import.owner) },
+                    );
+                }
+                for (import2.import_table.keys(), import2.import_table.values()) |name3, import3| {
+                    if (import3.root_source_file) |root_source_file3| {
+                        try roots_info_slc.writer().print(
+                            "       * {s} @ {s}\n",
+                            .{ name3, root_source_file3.getPath(import.owner) },
+                        );
+                    }
+                }
+            }
+        }
     }
 };
 
@@ -1236,7 +1351,7 @@ fn extractBuildInformation(
     //     .{ "diffz", "122089a8247a693cad53beb161bde6c30f71376cd4298798d45b32740c3581405864" },
     // };
 
-    var deps_build_roots: ArrayList(BuildConfig.DepsBuildRoots) = .{};
+    var deps_build_roots: ArrayList(BuildConfig.NamePathPair) = .{};
     for (dependencies.root_deps) |root_dep| {
         inline for (comptime std.meta.declarations(dependencies.packages)) |package| blk: {
             if (std.mem.eql(u8, package.name, root_dep[1])) {
@@ -1259,12 +1374,45 @@ fn extractBuildInformation(
         available_options.map.putAssumeCapacityNoClobber(available_option.key_ptr.*, available_option.value_ptr.*);
     }
 
+    // roots[]
+    var visited_steps: std.AutoArrayHashMapUnmanaged(*Step, void) = .{};
+    var unsorted_roots: std.ArrayListUnmanaged(roots_info.RootEntry) = .{};
+    var root_idx: u32 = 0;
+
+    for (b.top_level_steps.values()) |tls| {
+        try roots_info.collect(
+            gpa,
+            build_root,
+            &tls.step,
+            &visited_steps,
+            &unsorted_roots,
+        );
+    }
+
+    std.mem.sort(roots_info.RootEntry, unsorted_roots.items, build_root, roots_info.hasPrecedence);
+
+    var roots = try std.ArrayListUnmanaged(BuildConfig.RootEntry).initCapacity(gpa, unsorted_roots.items.len);
+    var roots_info_slc: ArrayListManaged(u8) = .init(gpa);
+    for (unsorted_roots.items) |item| {
+        roots.appendAssumeCapacity(.{ .name = item.step.name, .mods = item.mods });
+        try roots_info.print(&roots_info_slc, &root_idx, item.step);
+    }
+
+    var dir_path = std.fs.path.dirname(self_path) orelse unreachable;
+    if (!std.fs.path.isAbsolute(dir_path)) dir_path = try std.fs.path.join(gpa, &.{ build_root, dir_path });
+    const file_path = try std.fs.path.join(gpa, &.{ dir_path, "roots.txt" });
+    const file = try std.fs.cwd().createFile(file_path, .{});
+    try file.writeAll(roots_info_slc.items);
+    file.close();
+
     const stringifyValueAlloc = if (@hasDecl(std.json, "Stringify")) std.json.Stringify.valueAlloc else std.json.stringifyAlloc;
 
     const stringified_build_config = try stringifyValueAlloc(
         gpa,
         BuildConfig{
+            .roots_info_file = file_path,
             .deps_build_roots = deps_build_roots.items,
+            .roots = roots.items,
             .packages = try packages.toPackageList(),
             .include_dirs = include_dirs.keys(),
             .top_level_steps = b.top_level_steps.keys(),
@@ -1276,6 +1424,8 @@ fn extractBuildInformation(
 
     var file_writer = std.fs.File.stdout().writer(&.{});
     file_writer.interface.writeAll(stringified_build_config) catch return file_writer.err.?;
+
+    cleanExit();
 }
 
 fn processPkgConfig(
@@ -1456,6 +1606,44 @@ const copied_from_zig = struct {
             return result;
         }
     }
+
+    const CliNamedModules = struct {
+        modules: std.AutoArrayHashMapUnmanaged(*Module, void),
+        names: std.StringArrayHashMapUnmanaged(void),
+
+        const Module = std.Build.Module;
+
+        /// Traverse the whole dependency graph and give every module a unique
+        /// name, ideally one named after what it's called somewhere in the graph.
+        /// It will help here to have both a mapping from module to name and a set
+        /// of all the currently-used names.
+        fn init(arena: Allocator, root_module: *Module) Allocator.Error!CliNamedModules {
+            var compile: CliNamedModules = .{
+                .modules = .{},
+                .names = .{},
+            };
+            const graph = root_module.getGraph();
+            {
+                assert(graph.modules[0] == root_module);
+                try compile.modules.put(arena, root_module, {});
+                try compile.names.put(arena, "root", {});
+            }
+            for (graph.modules[1..], graph.names[1..]) |mod, orig_name| {
+                var name = orig_name;
+                var n: usize = 0;
+                while (true) {
+                    const gop = try compile.names.getOrPut(arena, name);
+                    if (!gop.found_existing) {
+                        try compile.modules.putNoClobber(arena, mod, {});
+                        break;
+                    }
+                    name = try std.fmt.allocPrint(arena, "{s}{d}", .{ orig_name, n });
+                    n += 1;
+                }
+            }
+            return compile;
+        }
+    };
 };
 
 fn serveWatchErrorBundle(
