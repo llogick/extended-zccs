@@ -2762,7 +2762,15 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, options: ResolveOptions) error
             return if (value) |v| Type.fromIP(analyser, ty, v) else Type.fromIP(analyser, ty, null);
         },
 
-        .enum_literal => return Type.fromIP(analyser, .enum_literal_type, null),
+        .enum_literal => {
+            maybe_decl_init: {
+                const nloc = offsets.nodeToLoc(tree, node);
+                const name = offsets.locToSlice(tree.source, nloc)[1..]; // mind the '.'
+                const decl = (try analyser.getSymbolEnumLiteral(handle, nloc.end, name)) orelse break :maybe_decl_init;
+                return try decl.resolveType(analyser) orelse break :maybe_decl_init;
+            }
+            return Type.fromIP(analyser, .enum_literal_type, null);
+        },
         .unreachable_literal => return Type.fromIP(analyser, .noreturn_type, null),
         .anyframe_literal => return Type.fromIP(analyser, .anyframe_type, null),
 
@@ -6041,6 +6049,21 @@ pub fn resolveExpressionTypeFromAncestors(
         .call_one,
         .call_one_comma,
         => {
+            if (tree.nodeTag(node) == .enum_literal) {
+                if (ancestors.len < 1) return null; // need at least 1 for a fullVarDecl
+                const src_tok_i = tree.firstToken(node); // the .period
+
+                for (1..ancestors.len) |index| { // iterate over any .@"try" nodes (every 'try' before a '.init_decl()' adds a node)
+                    const var_decl = tree.fullVarDecl(ancestors[index]) orelse continue;
+                    const init_node = var_decl.ast.init_node.unwrap() orelse return null; // we found a fullVarDecl but it wasnt it -- bail out
+                    var trg_tok_i = tree.firstToken(init_node);
+                    while (tree.tokenTag(trg_tok_i) == .keyword_try) trg_tok_i += 1;
+                    if (trg_tok_i != src_tok_i) return null; // do we have the right .period ?
+
+                    return try analyser.resolveTypeOfNode(.of(ancestors[index], handle));
+                }
+            }
+
             var buffer: [1]Ast.Node.Index = undefined;
             const call = tree.fullCall(&buffer, ancestors[0]).?;
 
