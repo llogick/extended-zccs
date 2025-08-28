@@ -576,15 +576,6 @@ pub const Handle = struct {
         var tree = try Ast.parse(allocator, new_text, mode);
         errdefer tree.deinit(allocator);
 
-        // remove unused capacity
-        var nodes = tree.nodes.toMultiArrayList();
-        try nodes.setCapacity(allocator, nodes.len);
-        tree.nodes = nodes.slice();
-
-        // remove unused capacity
-        var tokens = tree.tokens.toMultiArrayList();
-        try tokens.setCapacity(allocator, tokens.len);
-        tree.tokens = tokens.slice();
         return tree;
     }
 };
