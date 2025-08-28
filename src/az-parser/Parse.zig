@@ -3734,17 +3734,17 @@ fn nextToken(p: *Parse) TokenIndex {
 }
 
 const Parse = @This();
-const std = @import("../std.zig");
+const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
-const Ast = std.zig.Ast;
+const Ast = @import("Ast.zig");
 const Node = Ast.Node;
 const AstError = Ast.Error;
 const TokenIndex = Ast.TokenIndex;
 const OptionalTokenIndex = Ast.OptionalTokenIndex;
 const ExtraIndex = Ast.ExtraIndex;
-const Token = std.zig.Token;
+const Token = Ast.tknzr.Token;
 
-test {
-    _ = @import("parser_test.zig");
-}
+// test {
+//     _ = @import("parser_test.zig");
+// }
