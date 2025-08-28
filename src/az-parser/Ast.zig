@@ -4,15 +4,17 @@
 //! For Zon syntax, the root node is at nodes[0] and contains lhs as the node
 //! index of the main expression.
 
-const std = @import("../std.zig");
+const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 const mem = std.mem;
-const Token = std.zig.Token;
+const Token = tknzr.Token;
 const Ast = @This();
 const Allocator = std.mem.Allocator;
 const Parse = @import("Parse.zig");
 const Writer = std.Io.Writer;
+pub const tknzr = @import("tokenizer.zig");
+const Tokenizer = tknzr.Tokenizer;
 
 /// Reference to externally-owned data.
 source: [:0]const u8,
@@ -130,6 +132,25 @@ pub const Span = struct {
     main: u32,
 };
 
+pub fn toStdAst(self: *Ast) std.zig.Ast {
+    return .{
+        .source = self.source,
+        .mode = self.mode,
+        .tokens = .{
+            .ptrs = self.tokens.ptrs,
+            .len = self.tokens.len,
+            .capacity = self.tokens.capacity,
+        },
+        .nodes = .{
+            .ptrs = self.nodes.ptrs,
+            .len = self.nodes.len,
+            .capacity = self.nodes.capacity,
+        },
+        .extra_data = self.extra_data,
+        .errors = @ptrCast(self.errors),
+    };
+}
+
 pub fn deinit(tree: *Ast, gpa: Allocator) void {
     tree.tokens.deinit(gpa);
     tree.nodes.deinit(gpa);
@@ -138,7 +159,7 @@ pub fn deinit(tree: *Ast, gpa: Allocator) void {
     tree.* = undefined;
 }
 
-pub const Mode = enum { zig, zon };
+pub const Mode = std.zig.Ast.Mode; // enum { zig, zon };
 
 /// Result should be freed with tree.deinit() when there are
 /// no more references to any of the tokens or nodes.
@@ -150,7 +171,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
     const estimated_token_count = source.len / 8;
     try tokens.ensureTotalCapacity(gpa, estimated_token_count);
 
-    var tokenizer = std.zig.Tokenizer.init(source);
+    var tokenizer = Tokenizer.init(source);
     while (true) {
         const token = tokenizer.next();
         try tokens.append(gpa, .{
@@ -203,20 +224,20 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
 
 /// `gpa` is used for allocating the resulting formatted source code.
 /// Caller owns the returned slice of bytes, allocated with `gpa`.
-pub fn renderAlloc(tree: Ast, gpa: Allocator) error{OutOfMemory}![]u8 {
-    var aw: std.io.Writer.Allocating = .init(gpa);
-    defer aw.deinit();
-    render(tree, gpa, &aw.writer, .{}) catch |err| switch (err) {
-        error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
-    };
-    return aw.toOwnedSlice();
-}
+// pub fn renderAlloc(tree: Ast, gpa: Allocator) error{OutOfMemory}![]u8 {
+//     var aw: std.io.Writer.Allocating = .init(gpa);
+//     defer aw.deinit();
+//     render(tree, gpa, &aw.writer, .{}) catch |err| switch (err) {
+//         error.WriteFailed, error.OutOfMemory => return error.OutOfMemory,
+//     };
+//     return aw.toOwnedSlice();
+// }
 
-pub const Render = @import("Ast/Render.zig");
+// pub const Render = @import("Ast/Render.zig");
 
-pub fn render(tree: Ast, gpa: Allocator, w: *Writer, fixups: Render.Fixups) Render.Error!void {
-    return Render.renderTree(gpa, w, tree, fixups);
-}
+// pub fn render(tree: Ast, gpa: Allocator, w: *Writer, fixups: Render.Fixups) Render.Error!void {
+//     return Render.renderTree(gpa, w, tree, fixups);
+// }
 
 /// Returns an extra offset for column and byte offset of errors that
 /// should point after the token in the error message.
@@ -4140,5 +4161,5 @@ pub fn tokensToSpan(tree: *const Ast, start: Ast.TokenIndex, end: Ast.TokenIndex
 
 test {
     _ = Parse;
-    _ = Render;
+    // _ = Render;
 }
