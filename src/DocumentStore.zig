@@ -178,6 +178,10 @@ pub const BuildFile = struct {
 /// Represents a Zig source file.
 pub const Handle = struct {
     uri: Uri,
+    /// Custom AST with extra data. Must be freed with .deinit
+    ast: CustomAst,
+    /// std.zig.Ast compatible mapping of the custom AST ('ast`)
+    /// Never .deinit directly
     tree: Ast,
     /// Contains one entry for every cimport in the document
     cimports: std.MultiArrayList(CImportHandle),
@@ -254,15 +258,18 @@ pub const Handle = struct {
     ) error{OutOfMemory}!Handle {
         const mode: Ast.Mode = if (std.mem.eql(u8, std.fs.path.extension(uri), ".zon")) .zon else .zig;
 
-        var tree = try parseTree(allocator, text, mode);
-        errdefer tree.deinit(allocator);
+        var custom_ast = try createAst(allocator, text, mode);
+        errdefer custom_ast.deinit(allocator);
 
-        var cimports = try collectCIncludes(allocator, tree);
+        const std_ast = custom_ast.toStdAst();
+
+        var cimports = try collectCIncludes(allocator, std_ast);
         errdefer cimports.deinit(allocator);
 
         return .{
             .uri = uri,
-            .tree = tree,
+            .ast = custom_ast,
+            .tree = std_ast,
             .cimports = cimports,
             .impl = .{
                 .status = .init(@bitCast(Status{
@@ -288,7 +295,7 @@ pub const Handle = struct {
         };
         if (status.has_document_scope) self.impl.document_scope.deinit(allocator);
         allocator.free(self.tree.source);
-        self.tree.deinit(allocator);
+        self.ast.deinit(allocator);
 
         if (self.impl.import_uris) |import_uris| {
             for (import_uris) |uri| allocator.free(uri);
@@ -570,14 +577,14 @@ pub const Handle = struct {
         }
     }
 
-    fn parseTree(allocator: std.mem.Allocator, new_text: [:0]const u8, mode: Ast.Mode) error{OutOfMemory}!Ast {
-        const tracy_zone_inner = tracy.traceNamed(@src(), "Ast.parse");
+    fn createAst(allocator: std.mem.Allocator, new_text: [:0]const u8, mode: Ast.Mode) error{OutOfMemory}!CustomAst {
+        const tracy_zone_inner = tracy.traceNamed(@src(), "createAst");
         defer tracy_zone_inner.end();
 
         var custom_ast = try CustomAst.parse(allocator, new_text, mode);
         errdefer custom_ast.deinit(allocator);
 
-        return custom_ast.toStdAst();
+        return custom_ast;
     }
 };
 

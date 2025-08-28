@@ -3,6 +3,8 @@ const std = @import("std");
 pub const Token = struct {
     tag: Tag,
     loc: Loc,
+    indent: u16 = 0,
+    is_first: bool,
 
     pub const Loc = struct {
         start: usize,
@@ -328,6 +330,7 @@ pub const Token = struct {
 pub const Tokenizer = struct {
     buffer: [:0]const u8,
     index: usize,
+    bom_present: bool = false,
 
     /// For debugging purposes.
     pub fn dump(self: *Tokenizer, token: *const Token) void {
@@ -335,10 +338,12 @@ pub const Tokenizer = struct {
     }
 
     pub fn init(buffer: [:0]const u8) Tokenizer {
+        const bom_present = std.mem.startsWith(u8, buffer, "\xEF\xBB\xBF");
         // Skip the UTF-8 BOM if present.
         return .{
             .buffer = buffer,
-            .index = if (std.mem.startsWith(u8, buffer, "\xEF\xBB\xBF")) 3 else 0,
+            .index = if (bom_present) 3 else 0,
+            .bom_present = bom_present,
         };
     }
 
@@ -399,107 +404,127 @@ pub const Tokenizer = struct {
                 .start = self.index,
                 .end = undefined,
             },
+            .indent = 0,
+            .is_first = false,
         };
+        const buffer_start_idx: u32 = if (self.bom_present) 3 else 0;
         state: switch (State.start) {
-            .start => switch (self.buffer[self.index]) {
-                0 => {
-                    if (self.index == self.buffer.len) {
-                        return .{
-                            .tag = .eof,
-                            .loc = .{
-                                .start = self.index,
-                                .end = self.index,
-                            },
-                        };
-                    } else {
-                        continue :state .invalid;
-                    }
-                },
-                ' ', '\n', '\t', '\r' => {
-                    self.index += 1;
-                    result.loc.start = self.index;
-                    continue :state .start;
-                },
-                '"' => {
-                    result.tag = .string_literal;
-                    continue :state .string_literal;
-                },
-                '\'' => {
-                    result.tag = .char_literal;
-                    continue :state .char_literal;
-                },
-                'a'...'z', 'A'...'Z', '_' => {
-                    result.tag = .identifier;
-                    continue :state .identifier;
-                },
-                '@' => continue :state .saw_at_sign,
-                '=' => continue :state .equal,
-                '!' => continue :state .bang,
-                '|' => continue :state .pipe,
-                '(' => {
-                    result.tag = .l_paren;
-                    self.index += 1;
-                },
-                ')' => {
-                    result.tag = .r_paren;
-                    self.index += 1;
-                },
-                '[' => {
-                    result.tag = .l_bracket;
-                    self.index += 1;
-                },
-                ']' => {
-                    result.tag = .r_bracket;
-                    self.index += 1;
-                },
-                ';' => {
-                    result.tag = .semicolon;
-                    self.index += 1;
-                },
-                ',' => {
-                    result.tag = .comma;
-                    self.index += 1;
-                },
-                '?' => {
-                    result.tag = .question_mark;
-                    self.index += 1;
-                },
-                ':' => {
-                    result.tag = .colon;
-                    self.index += 1;
-                },
-                '%' => continue :state .percent,
-                '*' => continue :state .asterisk,
-                '+' => continue :state .plus,
-                '<' => continue :state .angle_bracket_left,
-                '>' => continue :state .angle_bracket_right,
-                '^' => continue :state .caret,
-                '\\' => {
-                    result.tag = .multiline_string_literal_line;
-                    continue :state .backslash;
-                },
-                '{' => {
-                    result.tag = .l_brace;
-                    self.index += 1;
-                },
-                '}' => {
-                    result.tag = .r_brace;
-                    self.index += 1;
-                },
-                '~' => {
-                    result.tag = .tilde;
-                    self.index += 1;
-                },
-                '.' => continue :state .period,
-                '-' => continue :state .minus,
-                '/' => continue :state .slash,
-                '&' => continue :state .ampersand,
-                '0'...'9' => {
-                    result.tag = .number_literal;
-                    self.index += 1;
-                    continue :state .int;
-                },
-                else => continue :state .invalid,
+            .start => {
+                if (self.index == buffer_start_idx) result.is_first = true;
+                switch (self.buffer[self.index]) {
+                    0 => {
+                        if (self.index == self.buffer.len) {
+                            return .{
+                                .tag = .eof,
+                                .loc = .{
+                                    .start = self.index,
+                                    .end = self.index,
+                                },
+                                .indent = result.indent,
+                                .is_first = result.is_first,
+                            };
+                        } else {
+                            continue :state .invalid;
+                        }
+                    },
+                    ' ' => {
+                        result.indent += 1;
+                        self.index += 1;
+                        result.loc.start = self.index;
+                        continue :state .start;
+                    },
+                    '\n' => {
+                        result.is_first = true;
+                        self.index += 1;
+                        result.loc.start = self.index;
+                        continue :state .start;
+                    },
+                    '\t', '\r' => {
+                        self.index += 1;
+                        result.loc.start = self.index;
+                        continue :state .start;
+                    },
+                    '"' => {
+                        result.tag = .string_literal;
+                        continue :state .string_literal;
+                    },
+                    '\'' => {
+                        result.tag = .char_literal;
+                        continue :state .char_literal;
+                    },
+                    'a'...'z', 'A'...'Z', '_' => {
+                        result.tag = .identifier;
+                        continue :state .identifier;
+                    },
+                    '@' => continue :state .saw_at_sign,
+                    '=' => continue :state .equal,
+                    '!' => continue :state .bang,
+                    '|' => continue :state .pipe,
+                    '(' => {
+                        result.tag = .l_paren;
+                        self.index += 1;
+                    },
+                    ')' => {
+                        result.tag = .r_paren;
+                        self.index += 1;
+                    },
+                    '[' => {
+                        result.tag = .l_bracket;
+                        self.index += 1;
+                    },
+                    ']' => {
+                        result.tag = .r_bracket;
+                        self.index += 1;
+                    },
+                    ';' => {
+                        result.tag = .semicolon;
+                        self.index += 1;
+                    },
+                    ',' => {
+                        result.tag = .comma;
+                        self.index += 1;
+                    },
+                    '?' => {
+                        result.tag = .question_mark;
+                        self.index += 1;
+                    },
+                    ':' => {
+                        result.tag = .colon;
+                        self.index += 1;
+                    },
+                    '%' => continue :state .percent,
+                    '*' => continue :state .asterisk,
+                    '+' => continue :state .plus,
+                    '<' => continue :state .angle_bracket_left,
+                    '>' => continue :state .angle_bracket_right,
+                    '^' => continue :state .caret,
+                    '\\' => {
+                        result.tag = .multiline_string_literal_line;
+                        continue :state .backslash;
+                    },
+                    '{' => {
+                        result.tag = .l_brace;
+                        self.index += 1;
+                    },
+                    '}' => {
+                        result.tag = .r_brace;
+                        self.index += 1;
+                    },
+                    '~' => {
+                        result.tag = .tilde;
+                        self.index += 1;
+                    },
+                    '.' => continue :state .period,
+                    '-' => continue :state .minus,
+                    '/' => continue :state .slash,
+                    '&' => continue :state .ampersand,
+                    '0'...'9' => {
+                        result.tag = .number_literal;
+                        self.index += 1;
+                        continue :state .int;
+                    },
+                    else => continue :state .invalid,
+                }
             },
 
             .expect_newline => {
@@ -958,6 +983,8 @@ pub const Tokenizer = struct {
                                 .start = self.index,
                                 .end = self.index,
                             },
+                            .indent = result.indent,
+                            .is_first = result.is_first,
                         };
                     },
                     '!' => {
@@ -1010,6 +1037,8 @@ pub const Tokenizer = struct {
                                 .start = self.index,
                                 .end = self.index,
                             },
+                            .indent = result.indent,
+                            .is_first = result.is_first,
                         };
                     },
                     '\n' => {

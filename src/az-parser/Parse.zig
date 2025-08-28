@@ -5,6 +5,7 @@ pub const Error = error{ParseError} || Allocator.Error;
 gpa: Allocator,
 source: []const u8,
 tokens: Ast.TokenList.Slice,
+txdata: Ast.TokenXdataList.Slice,
 tok_i: TokenIndex,
 errors: std.ArrayListUnmanaged(AstError),
 nodes: Ast.NodeList,
