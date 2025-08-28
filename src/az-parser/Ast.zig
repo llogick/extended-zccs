@@ -20,6 +20,7 @@ const Tokenizer = tknzr.Tokenizer;
 source: [:0]const u8,
 
 tokens: TokenList.Slice,
+txdata: TokenXdataList.Slice,
 nodes: NodeList.Slice,
 extra_data: []u32,
 mode: Mode = .zig,
@@ -31,6 +32,10 @@ pub const ByteOffset = u32;
 pub const TokenList = std.MultiArrayList(struct {
     tag: Token.Tag,
     start: ByteOffset,
+});
+pub const TokenXdataList = std.MultiArrayList(struct {
+    indent: u16,
+    is_first: bool,
 });
 pub const NodeList = std.MultiArrayList(Node);
 
@@ -153,6 +158,7 @@ pub fn toStdAst(self: *Ast) std.zig.Ast {
 
 pub fn deinit(tree: *Ast, gpa: Allocator) void {
     tree.tokens.deinit(gpa);
+    tree.txdata.deinit(gpa);
     tree.nodes.deinit(gpa);
     gpa.free(tree.extra_data);
     gpa.free(tree.errors);
@@ -161,11 +167,14 @@ pub fn deinit(tree: *Ast, gpa: Allocator) void {
 
 pub const Mode = std.zig.Ast.Mode; // enum { zig, zon };
 
-/// Result should be freed with tree.deinit() when there are
+/// Result should be freed with .deinit() when there are
 /// no more references to any of the tokens or nodes.
 pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!Ast {
     var tokens = Ast.TokenList{};
+    var txdata = Ast.TokenXdataList{};
+
     defer tokens.deinit(gpa);
+    defer txdata.deinit(gpa);
 
     // Empirically, the zig std lib has an 8:1 ratio of source bytes to token count.
     const estimated_token_count = source.len / 8;
@@ -178,6 +187,10 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
             .tag = token.tag,
             .start = @intCast(token.loc.start),
         });
+        try txdata.append(gpa, .{
+            .indent = token.indent,
+            .is_first = token.is_first,
+        });
         if (token.tag == .eof) break;
     }
 
@@ -185,6 +198,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
         .source = source,
         .gpa = gpa,
         .tokens = tokens.slice(),
+        .txdata = txdata.slice(),
         .errors = .{},
         .nodes = .{},
         .extra_data = .{},
@@ -211,11 +225,11 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
     const errors = try parser.errors.toOwnedSlice(gpa);
     errdefer gpa.free(errors);
 
-    // TODO experiment with compacting the MultiArrayList slices here
     return Ast{
         .source = source,
         .mode = mode,
         .tokens = tokens.toOwnedSlice(),
+        .txdata = txdata.toOwnedSlice(),
         .nodes = parser.nodes.toOwnedSlice(),
         .extra_data = extra_data,
         .errors = errors,
