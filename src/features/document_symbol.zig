@@ -63,6 +63,7 @@ fn callback(ctx: *Context, tree: Ast, node: Ast.Node.Index) error{OutOfMemory}!v
 
         .test_decl => blk: {
             const test_name_token, const test_name = ast.testDeclNameAndToken(tree, node) orelse break :blk null;
+            if (test_name.len == 0) break :blk null; // vscode says "Error: name must not be falsy"
 
             break :blk .{
                 .name = test_name,
