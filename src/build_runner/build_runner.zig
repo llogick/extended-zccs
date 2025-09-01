@@ -1398,12 +1398,15 @@ fn extractBuildInformation(
         try roots_info.print(&roots_info_slc, &root_idx, item.step);
     }
 
-    var dir_path = std.fs.path.dirname(self_path) orelse unreachable;
-    if (!std.fs.path.isAbsolute(dir_path)) dir_path = try std.fs.path.join(gpa, &.{ build_root, dir_path });
-    const file_path = try std.fs.path.join(gpa, &.{ dir_path, "roots.txt" });
-    const file = try std.fs.cwd().createFile(file_path, .{});
-    try file.writeAll(roots_info_slc.items);
-    file.close();
+    const file_path = fp: {
+        var dir_path = std.fs.path.dirname(self_path) orelse unreachable;
+        if (!std.fs.path.isAbsolute(dir_path)) dir_path = try std.fs.path.join(gpa, &.{ build_root, dir_path });
+        const file_path = try std.fs.path.join(gpa, &.{ dir_path, "roots.txt" });
+        const file = std.fs.cwd().createFile(file_path, .{}) catch break :fp "";
+        try file.writeAll(roots_info_slc.items);
+        file.close();
+        break :fp file_path;
+    };
 
     const stringifyValueAlloc = if (@hasDecl(std.json, "Stringify")) std.json.Stringify.valueAlloc else std.json.stringifyAlloc;
 

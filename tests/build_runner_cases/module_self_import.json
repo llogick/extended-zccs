@@ -1,5 +1,7 @@
 {
+  "roots_info_file": "",
   "deps_build_roots": [],
+  "roots": [],
   "packages": [
     {
       "name": "bar",

@@ -45,7 +45,7 @@ pub fn main() !u8 {
     };
     defer gpa.free(actual);
 
-    if (std.mem.eql(u8, expected, actual)) return 0;
+    if (std.mem.eql(u8, expected[0..if (expected[expected.len - 1] == '\n') expected.len - 1 else expected.len], actual)) return 0;
 
     zls.testing.renderLineDiff(gpa, expected, actual);
 
