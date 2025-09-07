@@ -621,13 +621,13 @@ fn expectTopLevelDecl(p: *Parse) !?Node.Index {
                 const fn_decl_index = try p.reserveNode(.fn_decl);
                 errdefer p.unreserveNode(fn_decl_index);
 
-                const body_block = try p.parseBlock();
+                const body_block = try p.parseBlock() orelse return null;
                 return p.setNode(fn_decl_index, .{
                     .tag = .fn_decl,
                     .main_token = p.nodeMainToken(fn_proto),
                     .data = .{ .node_and_node = .{
                         fn_proto,
-                        body_block.?,
+                        body_block,
                     } },
                 });
             },
@@ -2076,9 +2076,79 @@ fn parseIfExpr(p: *Parse) !?Node.Index {
     return try p.parseIf(expectExpr);
 }
 
+fn hasPotentialRbrace(p: *Parse) bool {
+    const tok_firsts = p.txdata.items(.is_first);
+    const tok_indents = p.txdata.items(.indent);
+
+    var l_tok_i = p.tok_i;
+    var lines: u32 = 0;
+    while (l_tok_i != 0) : (l_tok_i -= 1) {
+        std.log.debug("ttag: {}", .{p.tokenTag(l_tok_i)});
+        if (p.tokenTag(l_tok_i) == .l_brace) break;
+        if (tok_firsts[l_tok_i]) {
+            if (lines > 0) break else lines += 1;
+        }
+    }
+    var u_tok_i = l_tok_i;
+    // while (l_tok_i != 0) : (l_tok_i -= 1) {
+    //     if (tok_firsts[l_tok_i] == true) break;
+    // }
+    // std.log.debug("ftt: {}, fti: {}", .{ p.tokenTag(l_tok_i), tok_indents[l_tok_i] });
+
+    var braces_depth: i32 = 0;
+    if(p.tokenTag(l_tok_i) == .r_brace) u_tok_i += 1;
+
+    var same_line: bool = true;
+    while (u_tok_i < p.tokens.len) : (u_tok_i += 1) {
+        if (tok_firsts[u_tok_i] == true) same_line = false;
+        switch (p.tokenTag(u_tok_i)) {
+            .l_brace => braces_depth += 1,
+            .r_brace => {
+                braces_depth -= 1;
+                if (braces_depth == 0) {
+                    if (same_line) return true;
+                    // std.log.debug("utt: {}, uti: {}", .{ p.tokenTag(u_tok_i), tok_indents[u_tok_i] });
+                    // return tok_indents[u_tok_i] >= tok_indents[l_tok_i];
+                    const maybe = tok_indents[u_tok_i] >= tok_indents[l_tok_i];
+                    if (!maybe) {
+                        std.log.debug(
+                            \\false: {} < {}
+                        , .{
+                            tok_indents[u_tok_i],
+                            tok_indents[l_tok_i],
+                        });
+                        l_tok_i = p.tok_i;
+                        lines = 0;
+                        while (l_tok_i != 0) : (l_tok_i -= 1) {
+                            std.log.debug("ttags: {}", .{p.tokenTag(l_tok_i)});
+                            if (tok_firsts[l_tok_i]) {
+                                if (lines > 0) break else lines += 1;
+                            }
+                        }
+                        var line: u32 = 0;
+                        while (l_tok_i != 0) : (l_tok_i -= 1) {
+                            if (tok_firsts[l_tok_i]) line += 1;
+                        }
+                        std.log.debug("line: ~{}", .{line});
+                    }
+                    return maybe;
+                }
+            },
+            else => {
+                // std.log.debug("ttag: {}", .{p.tokenTag(u_tok_i)});
+            },
+        }
+    }
+    std.log.debug("false 2", .{});
+    return false;
+}
+
 /// Block <- LBRACE Statement* RBRACE
 fn parseBlock(p: *Parse) !?Node.Index {
     const lbrace = p.eatToken(.l_brace) orelse return null;
+
+    // if (!p.hasPotentialRbrace()) return null;
+
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
     while (true) {

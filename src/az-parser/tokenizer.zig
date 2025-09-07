@@ -427,19 +427,15 @@ pub const Tokenizer = struct {
                             continue :state .invalid;
                         }
                     },
-                    ' ' => {
+                    ' ', '\t' => {
                         result.indent += 1;
                         self.index += 1;
                         result.loc.start = self.index;
                         continue :state .start;
                     },
-                    '\n' => {
+                    '\r', '\n' => {
                         result.is_first = true;
-                        self.index += 1;
-                        result.loc.start = self.index;
-                        continue :state .start;
-                    },
-                    '\t', '\r' => {
+                        result.indent = 0;
                         self.index += 1;
                         result.loc.start = self.index;
                         continue :state .start;
@@ -539,6 +535,7 @@ pub const Tokenizer = struct {
                     },
                     '\n' => {
                         self.index += 1;
+                        result.indent = 0;
                         result.loc.start = self.index;
                         continue :state .start;
                     },
@@ -993,6 +990,7 @@ pub const Tokenizer = struct {
                     },
                     '\n' => {
                         self.index += 1;
+                        result.indent = 0;
                         result.loc.start = self.index;
                         continue :state .start;
                     },
@@ -1042,6 +1040,7 @@ pub const Tokenizer = struct {
                         };
                     },
                     '\n' => {
+                        result.indent = 0;
                         self.index += 1;
                         result.loc.start = self.index;
                         continue :state .start;
