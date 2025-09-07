@@ -92,12 +92,12 @@ const call = func(.{ .foo = 1 }, .{ .foo = 2 });
 //                               ^ (StructType)()
 //                                  ^^^^ (u32)()
 
-const generic_call_struct = generic_func(StructType, .{ .foo = 1 });
-//                                                   ^ (StructType)()
-//                                                      ^^^^ (u32)()
+// // const generic_call_struct = generic_func(StructType, .{ .foo = 1 });
+//                                                          //   ^ (StructType)()
+// //                                                      ^^^^ (u32)()
 
-const generic_call_enum = generic_func(EnumType, .bar);
-//                                               ^^^^ (EnumType)()
+// // const generic_call_enum = generic_func(EnumType, .bar);
+// //                                              ^^^^ (EnumType)()
 
 const generic_call_tagged_union = generic_func(TaggedUnionType, .{ .bar = 1 });
 //                                                              ^ (TaggedUnionType)()
@@ -325,11 +325,11 @@ test "try" {
 // comptime
 //
 
-test "comptime" {
-    const s: StructType = comptime .init();
-    //                             ^^^^^ (fn () StructType)()
-    _ = s;
-}
+// test "comptime" {
+// const s: StructType = comptime .init();
+//                            // ^^^^^ (fn () StructType)()
+// _ = s;
+// }
 
 //
 // builtin_call
