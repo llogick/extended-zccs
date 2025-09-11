@@ -34,8 +34,12 @@ pub const TokenList = std.MultiArrayList(struct {
     start: ByteOffset,
 });
 pub const TokenXdataList = std.MultiArrayList(struct {
+    /// Whitespace(s)
     indent: u16,
+    /// Is first on a given line
     is_first: bool,
+    /// Only used for {l|r}_brace, set to it's matching {l|r}_brace index whithin TokenList; 0 == no match
+    matching_brace_idx: u32 = 0,
 });
 pub const NodeList = std.MultiArrayList(Node);
 
@@ -225,7 +229,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
     const errors = try parser.errors.toOwnedSlice(gpa);
     errdefer gpa.free(errors);
 
-    return Ast{
+    var ast: Ast = .{
         .source = source,
         .mode = mode,
         .tokens = tokens.toOwnedSlice(),
@@ -234,6 +238,33 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
         .extra_data = extra_data,
         .errors = errors,
     };
+
+    try ast.markMatchingBraces(gpa);
+
+    return ast;
+}
+
+pub fn markMatchingBraces(self: *Ast, gpa: Allocator) Allocator.Error!void {
+    if (self.errors.len != 0) return;
+
+    var l_braces_i: std.ArrayList(u32) = try .initCapacity(gpa, 256);
+    defer l_braces_i.deinit(gpa);
+
+    const ttags = self.tokens.items(.tag);
+    const mbidx = self.txdata.items(.matching_brace_idx);
+    for (ttags, 0..) |tag, idx| {
+        switch (tag) {
+            .l_brace => try l_braces_i.append(gpa, @intCast(idx)),
+            .r_brace => {
+                const last_l_brace = l_braces_i.items[l_braces_i.items.len - 1];
+                mbidx[last_l_brace] = @intCast(idx);
+                mbidx[idx] = @intCast(last_l_brace);
+                l_braces_i.items.len -= 1;
+            },
+            else => {},
+        }
+    }
+    // std.log.debug("mbidxs:\n{any}", .{mbidx});
 }
 
 /// `gpa` is used for allocating the resulting formatted source code.
