@@ -2096,7 +2096,7 @@ fn hasPotentialRbrace(p: *Parse) bool {
     // std.log.debug("ftt: {}, fti: {}", .{ p.tokenTag(l_tok_i), tok_indents[l_tok_i] });
 
     var braces_depth: i32 = 0;
-    if(p.tokenTag(l_tok_i) == .r_brace) u_tok_i += 1;
+    if (p.tokenTag(l_tok_i) == .r_brace) u_tok_i += 1;
 
     var same_line: bool = true;
     while (u_tok_i < p.tokens.len) : (u_tok_i += 1) {

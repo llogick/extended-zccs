@@ -16,14 +16,20 @@ const Writer = std.Io.Writer;
 pub const tknzr = @import("tokenizer.zig");
 const Tokenizer = tknzr.Tokenizer;
 
-/// Reference to externally-owned data.
+gpa: Allocator,
+
+/// Source bytes
+bytes: std.ArrayList(u8) = .empty,
+
+/// Convenience mapping into 'bytes'. ReadOnly
 source: [:0]const u8,
 
 tokens: TokenList.Slice,
 txdata: TokenXdataList.Slice,
 nodes: NodeList.Slice,
 extra_data: []u32,
-mode: Mode = .zig,
+kind: Kind = .zig,
+mode: Mode = .standard,
 
 errors: []const Error,
 
@@ -144,7 +150,7 @@ pub const Span = struct {
 pub fn toStdAst(self: *Ast) std.zig.Ast {
     return .{
         .source = self.source,
-        .mode = self.mode,
+        .mode = self.kind,
         .tokens = .{
             .ptrs = self.tokens.ptrs,
             .len = self.tokens.len,
@@ -160,29 +166,52 @@ pub fn toStdAst(self: *Ast) std.zig.Ast {
     };
 }
 
-pub fn deinit(tree: *Ast, gpa: Allocator) void {
+fn deinitAllButSourceBytes(tree: *Ast, gpa: Allocator) void {
     tree.tokens.deinit(gpa);
     tree.txdata.deinit(gpa);
     tree.nodes.deinit(gpa);
     gpa.free(tree.extra_data);
     gpa.free(tree.errors);
+}
+
+pub fn deinit(tree: *Ast, gpa: Allocator) void {
+    tree.deinitAllButSourceBytes(gpa);
+    tree.bytes.deinit(gpa);
     tree.* = undefined;
 }
 
-pub const Mode = std.zig.Ast.Mode; // enum { zig, zon };
+pub const Kind = std.zig.Ast.Mode; // enum { zig, zon };
+pub const Mode = enum { standard, extended };
 
-/// Result should be freed with .deinit() when there are
-/// no more references to any of the tokens or nodes.
-pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!Ast {
+/// Result shall be freed with .deinit(), takes ownership of the slice
+pub fn createFromBytesSlice(gpa: Allocator, source: [:0]const u8, kind: Kind, mode: Mode) Allocator.Error!Ast {
+    var bytes: std.ArrayList(u8) = try .initCapacity(gpa, source.len + 1);
+    errdefer bytes.deinit(gpa);
+
+    bytes.appendSliceAssumeCapacity(source);
+    bytes.items.len += 1;
+    bytes.items[bytes.items.len - 1] = 0x00;
+
+    defer gpa.free(source);
+    return createFromBytesArray(gpa, bytes, kind, mode);
+}
+
+/// Result shall be freed with .deinit(), takes ownership of the array
+pub fn createFromBytesArray(gpa: Allocator, bytes: std.ArrayList(u8), kind: Kind, mode: Mode) Allocator.Error!Ast {
     var tokens = Ast.TokenList{};
     var txdata = Ast.TokenXdataList{};
 
     defer tokens.deinit(gpa);
     defer txdata.deinit(gpa);
 
+    std.debug.assert(bytes.items[bytes.items.len - 1] == 0x00);
+
+    const source = bytes.items[0 .. bytes.items.len - 1 :0];
+
     // Empirically, the zig std lib has an 8:1 ratio of source bytes to token count.
     const estimated_token_count = source.len / 8;
     try tokens.ensureTotalCapacity(gpa, estimated_token_count);
+    try txdata.ensureTotalCapacity(gpa, estimated_token_count);
 
     var tokenizer = Tokenizer.init(source);
     while (true) {
@@ -219,7 +248,7 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
     const estimated_node_count = (tokens.len + 2) / 2;
     try parser.nodes.ensureTotalCapacity(gpa, estimated_node_count);
 
-    switch (mode) {
+    switch (kind) {
         .zig => try parser.parseRoot(),
         .zon => try parser.parseZon(),
     }
@@ -230,7 +259,10 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
     errdefer gpa.free(errors);
 
     var ast: Ast = .{
+        .gpa = gpa,
+        .bytes = bytes,
         .source = source,
+        .kind = kind,
         .mode = mode,
         .tokens = tokens.toOwnedSlice(),
         .txdata = txdata.toOwnedSlice(),
@@ -239,12 +271,28 @@ pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!A
         .errors = errors,
     };
 
-    try ast.markMatchingBraces(gpa);
+    if (mode != .standard) {
+        try ast.markMatchingBraces(gpa, 0, @intCast(tokens.len));
+    }
 
     return ast;
 }
 
-pub fn markMatchingBraces(self: *Ast, gpa: Allocator) Allocator.Error!void {
+pub fn update(
+    ast: *Ast,
+    // idx_lo: u32,
+    // idx_hi: u32,
+) !void {
+    ast.deinitAllButSourceBytes(ast.gpa);
+    ast.* = try createFromBytesArray(ast.gpa, ast.bytes, ast.kind, ast.mode);
+}
+
+pub fn markMatchingBraces(
+    self: *Ast,
+    gpa: Allocator,
+    range_idx_lo: u32,
+    range_idx_hi: u32,
+) Allocator.Error!void {
     if (self.errors.len != 0) return;
 
     var l_braces_i: std.ArrayList(u32) = try .initCapacity(gpa, 256);
@@ -252,7 +300,8 @@ pub fn markMatchingBraces(self: *Ast, gpa: Allocator) Allocator.Error!void {
 
     const ttags = self.tokens.items(.tag);
     const mbidx = self.txdata.items(.matching_brace_idx);
-    for (ttags, 0..) |tag, idx| {
+
+    for (ttags[range_idx_lo..range_idx_hi], range_idx_lo..) |tag, idx| {
         switch (tag) {
             .l_brace => try l_braces_i.append(gpa, @intCast(idx)),
             .r_brace => {

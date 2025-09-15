@@ -1141,19 +1141,11 @@ fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: ty
     if (notification.contentChanges.len == 0) return;
     const handle = server.document_store.getHandle(notification.textDocument.uri) orelse return;
 
-    const new_text = try diff.applyContentChanges(server.allocator, handle.tree.source, notification.contentChanges, server.offset_encoding);
+    try handle.applyContentChanges(
+        notification.contentChanges,
+        server.offset_encoding,
+    );
 
-    if (new_text.len > DocumentStore.max_document_size) {
-        log.err("change document '{s}' failed: text size ({d}) is above maximum length ({d})", .{
-            notification.textDocument.uri,
-            new_text.len,
-            DocumentStore.max_document_size,
-        });
-        server.allocator.free(new_text);
-        return error.InternalError;
-    }
-
-    try server.document_store.refreshLspSyncedDocument(handle.uri, new_text);
     server.generateDiagnostics(handle);
 }
 

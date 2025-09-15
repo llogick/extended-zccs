@@ -62,46 +62,6 @@ pub fn edits(
     return eds;
 }
 
-/// Caller owns returned memory.
-pub fn applyContentChanges(
-    allocator: std.mem.Allocator,
-    text: []const u8,
-    content_changes: []const types.TextDocumentContentChangeEvent,
-    encoding: offsets.Encoding,
-) error{OutOfMemory}![:0]const u8 {
-    const tracy_zone = tracy.trace(@src());
-    defer tracy_zone.end();
-
-    const last_full_text_index, const last_full_text = blk: {
-        var i: usize = content_changes.len;
-        while (i != 0) {
-            i -= 1;
-            switch (content_changes[i]) {
-                .literal_1 => |content_change| break :blk .{ i, content_change.text }, // TextDocumentContentChangeWholeDocument
-                .literal_0 => continue, // TextDocumentContentChangePartial
-            }
-        }
-        break :blk .{ null, text };
-    };
-
-    var text_array: std.ArrayList(u8) = .empty;
-    errdefer text_array.deinit(allocator);
-
-    try text_array.appendSlice(allocator, last_full_text);
-
-    // don't even bother applying changes before a full text change
-    const changes = content_changes[if (last_full_text_index) |index| index + 1 else 0..];
-
-    for (changes) |item| {
-        const content_change = item.literal_0; // TextDocumentContentChangePartial
-
-        const loc = offsets.rangeToLoc(text_array.items, content_change.range, encoding);
-        try text_array.replaceRange(allocator, loc.start, loc.end - loc.start, content_change.text);
-    }
-
-    return try text_array.toOwnedSliceSentinel(allocator, 0);
-}
-
 // https://cs.opensource.google/go/x/tools/+/master:internal/lsp/diff/diff.go;l=40
 
 fn textEditLessThan(_: void, lhs: types.TextEdit, rhs: types.TextEdit) bool {
