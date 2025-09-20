@@ -294,6 +294,7 @@ pub const Handle = struct {
         if (self.impl.import_uris) |import_uris| {
             for (import_uris) |uri| allocator.free(uri);
             allocator.free(import_uris);
+            self.impl.import_uris = null;
         }
 
         for (self.cimports.items(.source)) |source| allocator.free(source);
@@ -606,6 +607,8 @@ pub const Handle = struct {
         const tracy_zone = tracy.trace(@src());
         defer tracy_zone.end();
 
+        const prev_bytes_len = self.ast.bytes.items.len;
+
         // lowest and highest indexes affected by the change(s)
         var idx_lo: u32, //
         var idx_hi: u32, //
@@ -619,11 +622,11 @@ pub const Handle = struct {
                     // TextDocumentContentChangeWholeDocument
                     .literal_1 => |content_change| {
                         try self.ast.bytes.replaceRange(self.ast.gpa, 0, self.ast.bytes.items.len - 1, content_change.text);
-                        break :blk .{ 0, @intCast(self.ast.bytes.items.len), i };
+                        break :blk .{ 0, @intCast(self.ast.bytes.items.len - 1), i };
                     },
                 }
             }
-            break :blk .{ @intCast(self.ast.bytes.items.len), 0, null };
+            break :blk .{ @intCast(self.ast.bytes.items.len - 1), 0, null };
         };
 
         // don't even bother applying changes before a full text change
@@ -635,7 +638,7 @@ pub const Handle = struct {
             const loc = offsets.rangeToLoc(self.ast.bytes.items, content_change.range, encoding);
 
             if (loc.start < idx_lo) idx_lo = @intCast(loc.start);
-            const upper_index: u32 = @intCast(@max(loc.end, loc.start + content_change.text.len));
+            const upper_index: u32 = @intCast(loc.end);
             if (idx_hi < upper_index) idx_hi = upper_index;
 
             try self.ast.bytes.replaceRange(self.ast.gpa, loc.start, loc.end - loc.start, content_change.text);
@@ -652,7 +655,7 @@ pub const Handle = struct {
             return error.InternalError;
         }
 
-        try self.ast.update();
+        try self.ast.update(@intCast(prev_bytes_len), idx_lo, idx_hi);
 
         self.deinitAstDeps();
 

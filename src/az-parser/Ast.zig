@@ -35,18 +35,22 @@ errors: []const Error,
 
 pub const ByteOffset = u32;
 
-pub const TokenList = std.MultiArrayList(struct {
+pub const TokenInfo = struct {
     tag: Token.Tag,
     start: ByteOffset,
-});
-pub const TokenXdataList = std.MultiArrayList(struct {
+};
+
+pub const TokenXdata = struct {
     /// Whitespace(s)
     indent: u16,
     /// Is first on a given line
     is_first: bool,
     /// Only used for {l|r}_brace, set to it's matching {l|r}_brace index whithin TokenList; 0 == no match
     matching_brace_idx: u32 = 0,
-});
+};
+
+pub const TokenList = std.MultiArrayList(TokenInfo);
+pub const TokenXdataList = std.MultiArrayList(TokenXdata);
 pub const NodeList = std.MultiArrayList(Node);
 
 /// Index into `tokens`.
@@ -198,8 +202,8 @@ pub fn createFromBytesSlice(gpa: Allocator, source: [:0]const u8, kind: Kind, mo
 
 /// Result shall be freed with .deinit(), takes ownership of the array
 pub fn createFromBytesArray(gpa: Allocator, bytes: std.ArrayList(u8), kind: Kind, mode: Mode) Allocator.Error!Ast {
-    var tokens = Ast.TokenList{};
-    var txdata = Ast.TokenXdataList{};
+    var tokens: TokenList = .empty;
+    var txdata: TokenXdataList = .empty;
 
     defer tokens.deinit(gpa);
     defer txdata.deinit(gpa);
@@ -271,20 +275,379 @@ pub fn createFromBytesArray(gpa: Allocator, bytes: std.ArrayList(u8), kind: Kind
         .errors = errors,
     };
 
-    if (mode != .standard) {
+    if (mode != .standard and errors.len == 0) {
         try ast.markMatchingBraces(gpa, 0, @intCast(tokens.len));
     }
 
     return ast;
 }
 
+pub fn sourceIndexToTokenIndex(tree: *Ast, source_index: usize) Ast.TokenIndex {
+    const tokens_start = tree.tokens.items(.start);
+
+    // at which point to stop dividing and just iterate
+    // good results w/ 256 as well, anything lower/higher and the cost of
+    // dividing overruns the cost of iterating and vice versa
+    const threshold = 336;
+
+    var upper_index: Ast.TokenIndex = @intCast(tokens_start.len - 1); // The Ast always has a .eof token
+    var lower_index: Ast.TokenIndex = 0;
+    while (upper_index - lower_index > threshold) {
+        const mid = lower_index + (upper_index - lower_index) / 2;
+        if (tokens_start[mid] < source_index) {
+            lower_index = mid;
+        } else {
+            upper_index = mid;
+        }
+    }
+
+    while (upper_index > 0) : (upper_index -= 1) {
+        const token_start = tokens_start[upper_index];
+        if (token_start > source_index) continue; // checking for equality here is suboptimal
+        // Handle source_index being > than the last possible token_start (max_token_start < source_index < tree.source.len)
+        if (upper_index == tokens_start.len - 1) break;
+        // Check if source_index is within current token
+        // (`token_start - 1` to include it's loc.start source_index and avoid the equality part of the check)
+        const is_within_current_token = (source_index > (token_start - 1)) and (source_index < tokens_start[upper_index + 1]);
+        if (!is_within_current_token) upper_index += 1; // gone 1 past
+        break;
+    }
+
+    std.debug.assert(upper_index < tree.tokens.len);
+    return upper_index;
+}
+
+fn replaceMalRange(
+    gpa: Allocator,
+    comptime T: type,
+    dst_mal: *std.MultiArrayList(T),
+    start: usize,
+    len: usize,
+    src_mal: *std.MultiArrayList(T),
+) Allocator.Error!void {
+    const Elem = switch (@typeInfo(T)) {
+        .@"struct" => T,
+        else => @compileError(
+            \\This fn only supports structs,
+            \\see MultiArrayList.Elem on how to implement support for tagged unions.
+        ),
+    };
+
+    if ((len < src_mal.len) and ((dst_mal.len + (src_mal.len - len)) > dst_mal.capacity))
+        try dst_mal.ensureUnusedCapacity(gpa, @max(dst_mal.len + (src_mal.len - len), 4096));
+
+    var dst_slices = dst_mal.slice();
+    const src_slices = src_mal.slice();
+    const fields = std.meta.fields(Elem);
+
+    if (len == src_mal.len) {
+        inline for (fields, 0..) |_, field_index| {
+            const dst_field_slice = dst_slices.items(@enumFromInt(field_index));
+            const src_field_slice = src_slices.items(@enumFromInt(field_index));
+            @memcpy(dst_field_slice[start..][0..src_field_slice.len], src_field_slice);
+        }
+    } else if (len < src_mal.len) {
+        const xtra_len = src_mal.len - len;
+        const prev_len = dst_slices.len;
+        // std.log.debug("mal xtra_len: {}, prev_len: {}", .{ xtra_len, prev_len });
+        dst_slices.len += xtra_len;
+        inline for (fields, 0..) |_, field_index| {
+            const dst_field_slice = dst_slices.items(@enumFromInt(field_index));
+            const src_field_slice = src_slices.items(@enumFromInt(field_index));
+            @memmove(dst_field_slice[start + len + xtra_len ..], dst_field_slice[start + len .. prev_len]);
+            @memcpy(dst_field_slice[start..][0..src_mal.len], src_field_slice);
+            // if (field_index == 0) std.log.debug("new range: {any}", .{dst_field_slice[start..][0..src_mal.len]});
+        }
+    } else {
+        const shrink_len = len - src_mal.len;
+        inline for (fields, 0..) |_, field_index| {
+            const dst_field_slice = dst_slices.items(@enumFromInt(field_index));
+            const src_field_slice = src_slices.items(@enumFromInt(field_index));
+            @memcpy(dst_field_slice[start..][0..src_mal.len], src_field_slice);
+            const to_move = dst_field_slice[start + len ..];
+            @memmove(dst_field_slice[start + len - shrink_len ..][0..to_move.len], to_move);
+        }
+        dst_slices.len -= shrink_len;
+    }
+
+    dst_mal.len = dst_slices.len;
+}
+
+const ByteAndTokenIndices = struct {
+    byt_idx_lo: u32,
+    byt_idx_hi: u32,
+    tok_idx_lo: u32,
+    tok_idx_hi: u32,
+
+    pub const default: @This() = .{
+        .byt_idx_lo = 0,
+        .byt_idx_hi = 0,
+        .tok_idx_lo = 0,
+        .tok_idx_hi = 0,
+    };
+};
+
+pub const Delta = struct {
+    op: enum {
+        nop,
+        add,
+        sub,
+    },
+    value: u32,
+};
+
+/// Updates tokens in-place
+fn updateTokens(
+    ast: *Ast,
+    prev_bytes_len: u32,
+    bytes_idx_lo: u32,
+    bytes_idx_hi: u32,
+) !?ByteAndTokenIndices {
+    if (ast.bytes.items.len < 20 or ast.tokens.len < 20) return null;
+
+    var result: ByteAndTokenIndices = .{
+        .byt_idx_lo = bytes_idx_lo,
+        .byt_idx_hi = bytes_idx_hi,
+        .tok_idx_lo = undefined,
+        .tok_idx_hi = undefined,
+    };
+    // std.log.debug("bytes_idx lo: {}, hi: {}", .{ bytes_idx_lo, bytes_idx_hi });
+
+    const bytes_delta: Delta =
+        if (prev_bytes_len < ast.bytes.items.len) .{
+            .op = .add,
+            .value = @intCast(ast.bytes.items.len - prev_bytes_len),
+        } else if (prev_bytes_len > ast.bytes.items.len) .{
+            .op = .sub,
+            .value = @intCast(prev_bytes_len - ast.bytes.items.len),
+        } else .{
+            .op = .nop,
+            .value = 0,
+        };
+
+    // std.log.debug("bytes delta: {}", .{bytes_delta});
+
+    // Always retokenize whole line(s), because .comment(s)
+
+    // Whenever deleteing at a line's end the '\n' char floats back to byt_idx_lo, ie
+    // `const a = 1;^`                      =>         `const a = 1^`
+    // removed ----^^---- new line char     =>         byt_idx_lo -^- new line char
+    if (ast.bytes.items[result.byt_idx_lo] == '\n' and result.byt_idx_lo > 0) result.byt_idx_lo -= 1; // skip it
+    // Find the previous '\n'
+    while (result.byt_idx_lo != 0 and ast.bytes.items[result.byt_idx_lo] != '\n') result.byt_idx_lo -= 1; // beginning of retok range
+
+    // Grab the token; sourceIndexToTokenIndex always returns the prev token if source_index between tokens
+    result.tok_idx_lo = ast.sourceIndexToTokenIndex(result.byt_idx_lo);
+    // if !=0 => we've grabbed the last token on the prev line
+    if (result.tok_idx_lo != 0 and result.tok_idx_lo < ast.tokens.len - 1) result.tok_idx_lo += 1; // first lower range affected token (to replace)
+
+    const start_source_index = if (result.tok_idx_lo == 0) 0 else result.byt_idx_lo;
+
+    // std.log.debug("tiltag: {}", .{ast.tokenTag(result.tok_idx_lo)});
+
+    // byt_idx_hi is the upper boundary of the bytes that were replaced;
+    // depending on the replacement bytes range, larger/smaller/eq,
+    // calculate where it floated to
+    var upper_tokenize_byt_idx = switch (bytes_delta.op) {
+        .add => result.byt_idx_hi + bytes_delta.value,
+        .sub => result.byt_idx_hi - bytes_delta.value,
+        .nop => result.byt_idx_hi,
+    };
+
+    // upper_tokenize_byt_idx might be in the middle of a line =>
+    // more bytes to retokenize which will affect more tokens =>
+    // use the diff to adjust result.byt_idx_hi as the source_index for the upper, tokens affected, boundary
+    const prev_upper_tokenize_byt_idx: u32 = upper_tokenize_byt_idx;
+
+    const max_byte_idx = ast.bytes.items.len - 1;
+    // Find the next '\n'
+    while (upper_tokenize_byt_idx < max_byte_idx and ast.bytes.items[upper_tokenize_byt_idx] != '\n') upper_tokenize_byt_idx += 1; // upper boundary of retok range
+
+    // result.byt_idx_hi adjusted to the end of the line to retokenize
+    result.byt_idx_hi += upper_tokenize_byt_idx - prev_upper_tokenize_byt_idx;
+    // Grab the token
+    result.tok_idx_hi = ast.sourceIndexToTokenIndex(result.byt_idx_hi);
+    // Find the next token that is on a _new line_, it will be the upper boundary of tokens to replace
+    while (ast.tokens.items(.start)[result.tok_idx_hi] < result.byt_idx_hi and result.tok_idx_hi < ast.tokens.len - 1) result.tok_idx_hi += 1;
+
+    // std.log.debug("tihtag: {}", .{ast.tokenTag(result.tok_idx_hi)});
+    // std.log.debug("result: {}", .{result});
+
+    var new_tokens: TokenList = .empty;
+    try new_tokens.ensureTotalCapacity(ast.gpa, ast.tokens.len); // an overkill in 90%+ of the cases, but better than realloc'ing
+    defer new_tokens.deinit(ast.gpa);
+
+    var new_txdata: TokenXdataList = .empty;
+    try new_txdata.ensureUnusedCapacity(ast.gpa, ast.tokens.len);
+    defer new_txdata.deinit(ast.gpa);
+
+    // std.log.debug("ssr: {} esr: {}\n{s}\n{any}", .{
+    //     start_source_index,
+    //     upper_tokenize_byt_idx,
+    //     ast.bytes.items[start_source_index..upper_tokenize_byt_idx],
+    //     ast.tokens.items(.tag)[result.tok_idx_lo..result.tok_idx_hi],
+    // });
+
+    var tokenizer: Tokenizer = .{
+        .buffer = ast.source,
+        .index = start_source_index,
+    };
+
+    while (true) {
+        const token = tokenizer.next();
+        // std.log.debug("newtok: {}", .{token});
+        if (token.tag == .eof or (token.loc.start > upper_tokenize_byt_idx)) {
+            // std.log.debug("break@: {}", .{token});
+            break;
+        }
+        // std.log.debug("adding: {}", .{token});
+        try new_tokens.append(ast.gpa, .{
+            .tag = token.tag,
+            .start = @as(u32, @intCast(token.loc.start)),
+        });
+        try new_txdata.append(ast.gpa, .{
+            .indent = token.indent,
+            .is_first = token.is_first,
+        });
+    }
+
+    var tokens = ast.tokens.toMultiArrayList();
+    const prev_tokens_len = tokens.len;
+    const tokens_range_len = result.tok_idx_hi - result.tok_idx_lo;
+    // std.log.debug("ctok_len: {}, tk_range_len: {}, new_tokens_len: {}", .{ prev_tokens_len, tokens_range_len, new_tokens.len });
+
+    try replaceMalRange(
+        ast.gpa,
+        TokenInfo,
+        &tokens,
+        result.tok_idx_lo,
+        tokens_range_len,
+        &new_tokens,
+    );
+
+    const tokens_delta: Delta =
+        if (prev_tokens_len < tokens.len) .{
+            .op = .add,
+            .value = @intCast(tokens.len - prev_tokens_len),
+        } else if (prev_tokens_len > tokens.len) .{
+            .op = .sub,
+            .value = @intCast(prev_tokens_len - tokens.len),
+        } else .{
+            .op = .nop,
+            .value = 0,
+        };
+
+    // std.log.debug("tok_delta: {}", .{tokens_delta});
+
+    // We've modified tokens => tok_idx_hi might've flown off to a new place
+    switch (tokens_delta.op) {
+        .add => result.tok_idx_hi += tokens_delta.value,
+        .sub => result.tok_idx_hi -= tokens_delta.value,
+        .nop => {},
+    }
+
+    var txdata = ast.txdata.toMultiArrayList();
+
+    try replaceMalRange(
+        ast.gpa,
+        TokenXdata,
+        &txdata,
+        result.tok_idx_lo,
+        tokens_range_len,
+        &new_txdata,
+    );
+
+    const txdata_mbis = txdata.items(.matching_brace_idx);
+
+    switch (bytes_delta.op) {
+        .add => for (tokens.items(.start)[result.tok_idx_hi..], result.tok_idx_hi..) |*start, idx| {
+            start.* += bytes_delta.value;
+            if (txdata_mbis[idx] != 0) switch (tokens_delta.op) {
+                .add => txdata_mbis[idx] += tokens_delta.value,
+                .sub => txdata_mbis[idx] -= tokens_delta.value,
+                .nop => {},
+            };
+        },
+        .sub => for (tokens.items(.start)[result.tok_idx_hi..], result.tok_idx_hi..) |*start, idx| {
+            start.* -= bytes_delta.value;
+            if (txdata_mbis[idx] != 0) switch (tokens_delta.op) {
+                .add => txdata_mbis[idx] += tokens_delta.value,
+                .sub => txdata_mbis[idx] -= tokens_delta.value,
+                .nop => {},
+            };
+        },
+        .nop => {},
+    }
+
+    // TODO find prev known mbr_idx starting with result.tok_idx_lo, and then markMatchingBraces on the subrange
+
+    ast.*.tokens = tokens.toOwnedSlice();
+    ast.*.txdata = txdata.toOwnedSlice();
+
+    return result;
+}
+
 pub fn update(
     ast: *Ast,
-    // idx_lo: u32,
-    // idx_hi: u32,
-) !void {
+    prev_bytes_len: u32,
+    bytes_idx_lo: u32,
+    bytes_idx_hi: u32,
+) Allocator.Error!void {
+    ast.source = ast.bytes.items[0 .. ast.bytes.items.len - 1 :0];
+    if (try ast.updateTokens(prev_bytes_len, bytes_idx_lo, bytes_idx_hi)) |result| {
+        _ = result; // autofix
+        // std.log.debug("{any}", .{result});
+        try ast.recreateNodes();
+        return;
+    }
     ast.deinitAllButSourceBytes(ast.gpa);
     ast.* = try createFromBytesArray(ast.gpa, ast.bytes, ast.kind, ast.mode);
+}
+
+fn recreateNodes(ast: *Ast) Allocator.Error!void {
+    const gpa = ast.gpa;
+    var parser: Parse = .{
+        .source = ast.source,
+        .gpa = gpa,
+        .tokens = ast.tokens,
+        .txdata = ast.txdata,
+        .errors = .{},
+        .nodes = .{},
+        .extra_data = .{},
+        .scratch = .{},
+        .tok_i = 0,
+    };
+    defer parser.errors.deinit(gpa);
+    defer parser.nodes.deinit(gpa);
+    defer parser.extra_data.deinit(gpa);
+    defer parser.scratch.deinit(gpa);
+
+    // Empirically, Zig source code has a 2:1 ratio of tokens to AST nodes.
+    // Make sure at least 1 so we can use appendAssumeCapacity on the root node below.
+    const estimated_node_count = (ast.tokens.len + 2) / 2;
+    try parser.nodes.ensureTotalCapacity(gpa, estimated_node_count);
+
+    switch (ast.kind) {
+        .zig => try parser.parseRoot(),
+        .zon => try parser.parseZon(),
+    }
+
+    const extra_data = try parser.extra_data.toOwnedSlice(gpa);
+    errdefer gpa.free(extra_data);
+    const errors = try parser.errors.toOwnedSlice(gpa);
+    errdefer gpa.free(errors);
+
+    ast.*.nodes.deinit(ast.gpa);
+    gpa.free(ast.*.extra_data);
+    gpa.free(ast.*.errors);
+
+    ast.*.nodes = parser.nodes.toOwnedSlice();
+    ast.*.extra_data = extra_data;
+    ast.*.errors = errors;
+
+    if (ast.mode != .standard and errors.len == 0) {
+        try ast.markMatchingBraces(gpa, 0, @intCast(ast.tokens.len));
+    }
 }
 
 pub fn markMatchingBraces(
@@ -293,8 +656,6 @@ pub fn markMatchingBraces(
     range_idx_lo: u32,
     range_idx_hi: u32,
 ) Allocator.Error!void {
-    if (self.errors.len != 0) return;
-
     var l_braces_i: std.ArrayList(u32) = try .initCapacity(gpa, 256);
     defer l_braces_i.deinit(gpa);
 
