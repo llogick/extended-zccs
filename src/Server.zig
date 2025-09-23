@@ -1141,10 +1141,13 @@ fn changeDocumentHandler(server: *Server, _: std.mem.Allocator, notification: ty
     if (notification.contentChanges.len == 0) return;
     const handle = server.document_store.getHandle(notification.textDocument.uri) orelse return;
 
+    const ns1: i64 = @intCast(std.time.nanoTimestamp());
     try handle.applyContentChanges(
         notification.contentChanges,
         server.offset_encoding,
     );
+    const ns2: i64 = @intCast(std.time.nanoTimestamp());
+    std.log.debug("tD/dC: {D}", .{ns2 - ns1});
 
     server.generateDiagnostics(handle);
 }
