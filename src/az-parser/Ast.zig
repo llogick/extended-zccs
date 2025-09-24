@@ -38,9 +38,10 @@ pub const ByteOffset = u32;
 pub const TokenInfo = struct {
     tag: Token.Tag,
     start: ByteOffset,
+    // matching_brace_idx: u32 = 0,
 };
 
-pub const TokenXdata = struct {
+pub const TokenXdata = struct { // TODO Merge these into TokenInfo (Do we even need the first two?)
     /// Whitespace(s)
     indent: u16,
     /// Is first on a given line
@@ -151,12 +152,19 @@ pub const Span = struct {
     main: u32,
 };
 
+/// IMPORTANT: Result is invalidated by every .update()
 pub fn toStdAst(self: *Ast) std.zig.Ast {
+    if ((@intFromEnum(@as(std.zig.Ast.TokenList.Field, .tag)) != @intFromEnum(@as(TokenList.Field, .tag))) or
+        (@intFromEnum(@as(std.zig.Ast.TokenList.Field, .start)) != @intFromEnum(@as(TokenList.Field, .start))))
+        @compileError(
+            \\Fatal: Field indexes mismatch for TokenList.
+            \\TODO: Implement runtime assignment of the correct indices.
+        );
     return .{
         .source = self.source,
         .mode = self.kind,
         .tokens = .{
-            .ptrs = self.tokens.ptrs,
+            .ptrs = self.tokens.ptrs[0..2].*,
             .len = self.tokens.len,
             .capacity = self.tokens.capacity,
         },
@@ -387,14 +395,40 @@ const ByteAndTokenIndices = struct {
     };
 };
 
-pub const Delta = struct {
-    op: enum {
-        nop,
-        add,
-        sub,
-    },
-    value: u32,
-};
+// .. a bit fancy, a bit taxing on debug builds, but lessens noise
+fn Delta() type {
+    return struct {
+        op: enum {
+            add,
+            sub,
+            nop,
+        } = .nop,
+        value: u32 = 0,
+
+        const Self = @This();
+
+        pub fn init(current_value: u32, prev_value: u32) Self {
+            return if (current_value > prev_value) .{ // addition is most likely in source code
+                .op = .add,
+                .value = @intCast(current_value - prev_value),
+            } else if (current_value < prev_value) .{ // followed by subtraction (deletion)
+                .op = .sub,
+                .value = @intCast(prev_value - current_value),
+            } else .{ // equal lens (same len rename/replace case)
+                .op = .nop,
+                .value = 0,
+            };
+        }
+
+        pub fn applyTo(self: *const Self, value: u32) u32 {
+            return switch (self.op) {
+                .add => value + self.value,
+                .sub => value - self.value,
+                .nop => value,
+            };
+        }
+    };
+}
 
 /// Updates tokens in-place
 fn updateTokens(
@@ -413,18 +447,7 @@ fn updateTokens(
     };
     // std.log.debug("bytes_idx lo: {}, hi: {}", .{ bytes_idx_lo, bytes_idx_hi });
 
-    const bytes_delta: Delta =
-        if (prev_bytes_len < ast.bytes.items.len) .{
-            .op = .add,
-            .value = @intCast(ast.bytes.items.len - prev_bytes_len),
-        } else if (prev_bytes_len > ast.bytes.items.len) .{
-            .op = .sub,
-            .value = @intCast(prev_bytes_len - ast.bytes.items.len),
-        } else .{
-            .op = .nop,
-            .value = 0,
-        };
-
+    const bytes_delta: Delta() = .init(@intCast(ast.bytes.items.len), prev_bytes_len);
     // std.log.debug("bytes delta: {}", .{bytes_delta});
 
     // Always retokenize whole line(s), because .comment(s)
@@ -448,11 +471,7 @@ fn updateTokens(
     // byt_idx_hi is the upper boundary of the bytes that were replaced;
     // depending on the replacement bytes range, larger/smaller/eq,
     // calculate where it floated to
-    var upper_tokenize_byt_idx = switch (bytes_delta.op) {
-        .add => result.byt_idx_hi + bytes_delta.value,
-        .sub => result.byt_idx_hi - bytes_delta.value,
-        .nop => result.byt_idx_hi,
-    };
+    var upper_tokenize_byt_idx = bytes_delta.applyTo(result.byt_idx_hi);
 
     // upper_tokenize_byt_idx might be in the middle of a line =>
     // more bytes to retokenize which will affect more tokens =>
@@ -512,7 +531,7 @@ fn updateTokens(
     }
 
     var tokens = ast.tokens.toMultiArrayList();
-    const prev_tokens_len = tokens.len;
+    const prev_tokens_len: u32 = @intCast(tokens.len);
     const tokens_range_len = result.tok_idx_hi - result.tok_idx_lo;
     // std.log.debug("ctok_len: {}, tk_range_len: {}, new_tokens_len: {}", .{ prev_tokens_len, tokens_range_len, new_tokens.len });
 
@@ -525,26 +544,11 @@ fn updateTokens(
         &new_tokens,
     );
 
-    const tokens_delta: Delta =
-        if (prev_tokens_len < tokens.len) .{
-            .op = .add,
-            .value = @intCast(tokens.len - prev_tokens_len),
-        } else if (prev_tokens_len > tokens.len) .{
-            .op = .sub,
-            .value = @intCast(prev_tokens_len - tokens.len),
-        } else .{
-            .op = .nop,
-            .value = 0,
-        };
-
+    const tokens_delta: Delta() = .init(@intCast(tokens.len), prev_tokens_len);
     // std.log.debug("tok_delta: {}", .{tokens_delta});
 
     // We've modified tokens => tok_idx_hi might've flown off to a new place
-    switch (tokens_delta.op) {
-        .add => result.tok_idx_hi += tokens_delta.value,
-        .sub => result.tok_idx_hi -= tokens_delta.value,
-        .nop => {},
-    }
+    result.tok_idx_hi = tokens_delta.applyTo(result.tok_idx_hi);
 
     var txdata = ast.txdata.toMultiArrayList();
 
@@ -557,24 +561,24 @@ fn updateTokens(
         &new_txdata,
     );
 
-    const txdata_mbis = txdata.items(.matching_brace_idx);
-
+    // switch first, iterate after
     switch (bytes_delta.op) {
-        .add => for (tokens.items(.start)[result.tok_idx_hi..], result.tok_idx_hi..) |*start, idx| {
+        .add => for (tokens.items(.start)[result.tok_idx_hi..]) |*start| {
             start.* += bytes_delta.value;
-            if (txdata_mbis[idx] != 0) switch (tokens_delta.op) {
-                .add => txdata_mbis[idx] += tokens_delta.value,
-                .sub => txdata_mbis[idx] -= tokens_delta.value,
-                .nop => {},
-            };
         },
-        .sub => for (tokens.items(.start)[result.tok_idx_hi..], result.tok_idx_hi..) |*start, idx| {
+        .sub => for (tokens.items(.start)[result.tok_idx_hi..]) |*start| {
             start.* -= bytes_delta.value;
-            if (txdata_mbis[idx] != 0) switch (tokens_delta.op) {
-                .add => txdata_mbis[idx] += tokens_delta.value,
-                .sub => txdata_mbis[idx] -= tokens_delta.value,
-                .nop => {},
-            };
+        },
+        .nop => {},
+    }
+
+    // always do separate iterations on each field of a MAL (as intended, to take advantage of the cache lines)
+    switch (tokens_delta.op) {
+        .add => for (txdata.items(.matching_brace_idx)[result.tok_idx_hi..]) |*mbi| {
+            if (mbi.* != 0) mbi.* += tokens_delta.value;
+        },
+        .sub => for (txdata.items(.matching_brace_idx)[result.tok_idx_hi..]) |*mbi| {
+            if (mbi.* != 0) mbi.* -= tokens_delta.value;
         },
         .nop => {},
     }
