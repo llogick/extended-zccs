@@ -25,11 +25,14 @@ bytes: std.ArrayList(u8) = .empty,
 source: [:0]const u8,
 
 tokens: TokenList.Slice,
-txdata: TokenXdataList.Slice,
 nodes: NodeList.Slice,
+xtra_data: std.ArrayList(u32),
 extra_data: []u32,
 kind: Kind = .zig,
 mode: Mode = .standard,
+states: Parse.InternalStates,
+/// Only set to true whenever markMatchingBraces ran on a no/0 errors ast
+initial_brace_matching_done: bool = false,
 
 errors: []const Error,
 
@@ -38,12 +41,8 @@ pub const ByteOffset = u32;
 pub const TokenInfo = struct {
     tag: Token.Tag,
     start: ByteOffset,
-    // matching_brace_idx: u32 = 0,
-};
-
-pub const TokenXdata = struct { // TODO Merge these into TokenInfo (Do we even need the first two?)
-    /// Whitespace(s)
-    indent: u16,
+    /// blank chars
+    blanks: u16,
     /// Is first on a given line
     is_first: bool,
     /// Only used for {l|r}_brace, set to it's matching {l|r}_brace index whithin TokenList; 0 == no match
@@ -51,7 +50,6 @@ pub const TokenXdata = struct { // TODO Merge these into TokenInfo (Do we even n
 };
 
 pub const TokenList = std.MultiArrayList(TokenInfo);
-pub const TokenXdataList = std.MultiArrayList(TokenXdata);
 pub const NodeList = std.MultiArrayList(Node);
 
 /// Index into `tokens`.
@@ -173,23 +171,30 @@ pub fn toStdAst(self: *Ast) std.zig.Ast {
             .len = self.nodes.len,
             .capacity = self.nodes.capacity,
         },
-        .extra_data = self.extra_data,
+        .extra_data = self.xtra_data.items[0..],
         .errors = @ptrCast(self.errors),
     };
 }
 
-fn deinitAllButSourceBytes(tree: *Ast, gpa: Allocator) void {
-    tree.tokens.deinit(gpa);
-    tree.txdata.deinit(gpa);
-    tree.nodes.deinit(gpa);
-    gpa.free(tree.extra_data);
-    gpa.free(tree.errors);
+fn deinitNodesAndRelatedData(ast: *Ast) void {
+    const gpa = ast.gpa;
+    ast.nodes.deinit(gpa);
+    ast.xtra_data.deinit(gpa);
+    gpa.free(ast.errors);
+    ast.states.deinit(gpa);
 }
 
-pub fn deinit(tree: *Ast, gpa: Allocator) void {
-    tree.deinitAllButSourceBytes(gpa);
-    tree.bytes.deinit(gpa);
-    tree.* = undefined;
+fn deinitAllButSourceBytes(ast: *Ast) void {
+    const gpa = ast.gpa;
+    ast.tokens.deinit(gpa);
+    ast.deinitNodesAndRelatedData();
+}
+
+pub fn destroy(ast: *Ast) void {
+    const gpa = ast.gpa;
+    ast.deinitAllButSourceBytes();
+    ast.bytes.deinit(gpa);
+    ast.* = undefined;
 }
 
 pub const Kind = std.zig.Ast.Mode; // enum { zig, zon };
@@ -211,10 +216,7 @@ pub fn createFromBytesSlice(gpa: Allocator, source: [:0]const u8, kind: Kind, mo
 /// Result shall be freed with .deinit(), takes ownership of the array
 pub fn createFromBytesArray(gpa: Allocator, bytes: std.ArrayList(u8), kind: Kind, mode: Mode) Allocator.Error!Ast {
     var tokens: TokenList = .empty;
-    var txdata: TokenXdataList = .empty;
-
     defer tokens.deinit(gpa);
-    defer txdata.deinit(gpa);
 
     std.debug.assert(bytes.items[bytes.items.len - 1] == 0x00);
 
@@ -223,7 +225,6 @@ pub fn createFromBytesArray(gpa: Allocator, bytes: std.ArrayList(u8), kind: Kind
     // Empirically, the zig std lib has an 8:1 ratio of source bytes to token count.
     const estimated_token_count = source.len / 8;
     try tokens.ensureTotalCapacity(gpa, estimated_token_count);
-    try txdata.ensureTotalCapacity(gpa, estimated_token_count);
 
     var tokenizer = Tokenizer.init(source);
     while (true) {
@@ -231,28 +232,29 @@ pub fn createFromBytesArray(gpa: Allocator, bytes: std.ArrayList(u8), kind: Kind
         try tokens.append(gpa, .{
             .tag = token.tag,
             .start = @intCast(token.loc.start),
-        });
-        try txdata.append(gpa, .{
-            .indent = token.indent,
+            .blanks = token.indent,
             .is_first = token.is_first,
         });
         if (token.tag == .eof) break;
     }
 
     var parser: Parse = .{
-        .source = source,
         .gpa = gpa,
+        .mode = mode,
+        .source = source,
         .tokens = tokens.slice(),
-        .txdata = txdata.slice(),
         .errors = .{},
         .nodes = .{},
         .extra_data = .{},
         .scratch = .{},
+        .states = .{},
         .tok_i = 0,
     };
+
+    errdefer parser.states.deinit(gpa);
+
     defer parser.errors.deinit(gpa);
     defer parser.nodes.deinit(gpa);
-    defer parser.extra_data.deinit(gpa);
     defer parser.scratch.deinit(gpa);
 
     // Empirically, Zig source code has a 2:1 ratio of tokens to AST nodes.
@@ -264,9 +266,6 @@ pub fn createFromBytesArray(gpa: Allocator, bytes: std.ArrayList(u8), kind: Kind
         .zig => try parser.parseRoot(),
         .zon => try parser.parseZon(),
     }
-
-    const extra_data = try parser.extra_data.toOwnedSlice(gpa);
-    errdefer gpa.free(extra_data);
     const errors = try parser.errors.toOwnedSlice(gpa);
     errdefer gpa.free(errors);
 
@@ -277,14 +276,16 @@ pub fn createFromBytesArray(gpa: Allocator, bytes: std.ArrayList(u8), kind: Kind
         .kind = kind,
         .mode = mode,
         .tokens = tokens.toOwnedSlice(),
-        .txdata = txdata.toOwnedSlice(),
         .nodes = parser.nodes.toOwnedSlice(),
-        .extra_data = extra_data,
+        .xtra_data = parser.extra_data,
+        .extra_data = parser.extra_data.items[0..],
         .errors = errors,
+        .states = parser.states,
     };
 
     if (mode != .standard and errors.len == 0) {
         try ast.markMatchingBraces(gpa, 0, @intCast(tokens.len));
+        ast.initial_brace_matching_done = true;
     }
 
     return ast;
@@ -381,7 +382,7 @@ fn replaceMalRange(
     dst_mal.len = dst_slices.len;
 }
 
-const ByteAndTokenIndices = struct {
+const AffectedIndices = struct {
     byt_idx_lo: u32,
     byt_idx_hi: u32,
     tok_idx_lo: u32,
@@ -436,10 +437,10 @@ fn updateTokens(
     prev_bytes_len: u32,
     bytes_idx_lo: u32,
     bytes_idx_hi: u32,
-) !?ByteAndTokenIndices {
+) !?AffectedIndices {
     if (ast.bytes.items.len < 20 or ast.tokens.len < 20) return null;
 
-    var result: ByteAndTokenIndices = .{
+    var result: AffectedIndices = .{
         .byt_idx_lo = bytes_idx_lo,
         .byt_idx_hi = bytes_idx_hi,
         .tok_idx_lo = undefined,
@@ -496,10 +497,6 @@ fn updateTokens(
     try new_tokens.ensureTotalCapacity(ast.gpa, ast.tokens.len); // an overkill in 90%+ of the cases, but better than realloc'ing
     defer new_tokens.deinit(ast.gpa);
 
-    var new_txdata: TokenXdataList = .empty;
-    try new_txdata.ensureUnusedCapacity(ast.gpa, ast.tokens.len);
-    defer new_txdata.deinit(ast.gpa);
-
     // std.log.debug("ssr: {} esr: {}\n{s}\n{any}", .{
     //     start_source_index,
     //     upper_tokenize_byt_idx,
@@ -523,9 +520,7 @@ fn updateTokens(
         try new_tokens.append(ast.gpa, .{
             .tag = token.tag,
             .start = @as(u32, @intCast(token.loc.start)),
-        });
-        try new_txdata.append(ast.gpa, .{
-            .indent = token.indent,
+            .blanks = token.indent,
             .is_first = token.is_first,
         });
     }
@@ -549,18 +544,6 @@ fn updateTokens(
 
     // We've modified tokens => tok_idx_hi might've flown off to a new place
     result.tok_idx_hi = tokens_delta.applyTo(result.tok_idx_hi);
-
-    var txdata = ast.txdata.toMultiArrayList();
-
-    try replaceMalRange(
-        ast.gpa,
-        TokenXdata,
-        &txdata,
-        result.tok_idx_lo,
-        tokens_range_len,
-        &new_txdata,
-    );
-
     // switch first, iterate after
     switch (bytes_delta.op) {
         .add => for (tokens.items(.start)[result.tok_idx_hi..]) |*start| {
@@ -574,10 +557,10 @@ fn updateTokens(
 
     // always do separate iterations on each field of a MAL (as intended, to take advantage of the cache lines)
     switch (tokens_delta.op) {
-        .add => for (txdata.items(.matching_brace_idx)[result.tok_idx_hi..]) |*mbi| {
+        .add => for (tokens.items(.matching_brace_idx)[result.tok_idx_hi..]) |*mbi| {
             if (mbi.* != 0) mbi.* += tokens_delta.value;
         },
-        .sub => for (txdata.items(.matching_brace_idx)[result.tok_idx_hi..]) |*mbi| {
+        .sub => for (tokens.items(.matching_brace_idx)[result.tok_idx_hi..]) |*mbi| {
             if (mbi.* != 0) mbi.* -= tokens_delta.value;
         },
         .nop => {},
@@ -586,7 +569,6 @@ fn updateTokens(
     // TODO find prev known mbr_idx starting with result.tok_idx_lo, and then markMatchingBraces on the subrange
 
     ast.*.tokens = tokens.toOwnedSlice();
-    ast.*.txdata = txdata.toOwnedSlice();
 
     return result;
 }
@@ -598,32 +580,118 @@ pub fn update(
     bytes_idx_hi: u32,
 ) Allocator.Error!void {
     ast.source = ast.bytes.items[0 .. ast.bytes.items.len - 1 :0];
-    if (try ast.updateTokens(prev_bytes_len, bytes_idx_lo, bytes_idx_hi)) |result| {
-        _ = result; // autofix
+    if (try ast.updateTokens(prev_bytes_len, bytes_idx_lo, bytes_idx_hi)) |affected_indices| {
         // std.log.debug("{any}", .{result});
+        if (ast.kind == .zig) reuse: {
+            // if (!ast.initial_brace_matching_done) try reuseRootDecls else try doComplexReparse();
+            // try ast.reuseRootDecls(affected_indices);
+            if (!(try ast.reuseRootDecls(affected_indices))) break :reuse;
+            return;
+        }
         try ast.recreateNodes();
         return;
     }
-    ast.deinitAllButSourceBytes(ast.gpa);
+    ast.deinitAllButSourceBytes();
     ast.* = try createFromBytesArray(ast.gpa, ast.bytes, ast.kind, ast.mode);
+}
+
+fn reuseRootDecls(ast: *Ast, indices: AffectedIndices) Allocator.Error!bool {
+    // if (true) return false;
+    if (ast.*.states.items.len < 2) return false; // Nothing to reuse
+    const first_affected_root_decl_idx = for (ast.*.states.items, 0..) |state, root_decl_idx| {
+        const tail = state.range.tail;
+        if (tail.token_idx < indices.tok_idx_lo and tail.errors_len == 0) continue;
+        if (root_decl_idx == 0) return false;
+        // std.log.debug("affected root_decl_idx: {} state:\n{}", .{ root_decl_idx, state });
+        // if token_idx is between two root_decls grab the previous one (trust me)
+        break if (indices.tok_idx_lo < state.range.head.token_idx) root_decl_idx - 1 else root_decl_idx;
+    } else return false;
+
+    // std.log.debug("ast.states pre: {}", .{ast.states});
+
+    const gpa = ast.gpa;
+
+    // We _cannot_ use the tail state of the prev node due to fns reserving nodes and messing with tail state
+
+    const affected_node_state = ast.states.items[first_affected_root_decl_idx];
+    if (!(affected_node_state.range.head.token_idx < ast.tokens.len)) return false;
+
+    var scratch: std.ArrayList(Node.Index) = try .initCapacity(gpa, ast.states.items.len);
+    ast.states.items.len = first_affected_root_decl_idx;
+    for (ast.*.states.items) |state| scratch.appendAssumeCapacity(state.node_idx);
+
+    ast.nodes.len = affected_node_state.range.head.nodes_len;
+    ast.xtra_data.items.len = affected_node_state.range.head.xdata_len;
+
+    // TODO Handle(preserve) errors better
+    // test case
+    // <root decls>
+    // //! <- do this => "expected ..., found a doc_comment"
+    // <root decls> <- then introduce a syntax error in one of the root_decls here -> error dissapears
+
+    var parser: Parse = .{
+        .gpa = gpa,
+        .mode = ast.mode,
+        .source = ast.source,
+        .tokens = ast.tokens,
+        .errors = .{},
+        .nodes = ast.nodes.toMultiArrayList(),
+        .extra_data = ast.xtra_data,
+        .scratch = scratch,
+        .states = ast.states,
+        .tok_i = affected_node_state.range.head.token_idx,
+    };
+
+    // std.log.debug("P: {}", .{parser});
+
+    defer parser.errors.deinit(gpa);
+    defer parser.scratch.deinit(gpa);
+
+    switch (ast.kind) {
+        .zig => try parser.parseRoot(),
+        .zon => try parser.parseZon(),
+    }
+
+    gpa.free(ast.*.errors);
+
+    const errors = try parser.errors.toOwnedSlice(gpa);
+    errdefer gpa.free(errors);
+
+    ast.*.nodes = parser.nodes.toOwnedSlice();
+    ast.*.xtra_data = parser.extra_data;
+    ast.*.extra_data = parser.extra_data.items[0..];
+    ast.*.errors = errors;
+    ast.*.states = parser.states;
+
+    // std.log.debug("ast.states aft: {}", .{ast.states});
+
+    // std.log.debug("reused", .{});
+
+    return true;
 }
 
 fn recreateNodes(ast: *Ast) Allocator.Error!void {
     const gpa = ast.gpa;
+
+    ast.*.nodes.deinit(ast.gpa);
+    ast.*.xtra_data.deinit(gpa);
+    gpa.free(ast.*.errors);
+    ast.*.states.deinit(ast.*.gpa);
+
     var parser: Parse = .{
-        .source = ast.source,
         .gpa = gpa,
+        .mode = ast.mode,
+        .source = ast.source,
         .tokens = ast.tokens,
-        .txdata = ast.txdata,
         .errors = .{},
         .nodes = .{},
         .extra_data = .{},
         .scratch = .{},
+        .states = .empty,
         .tok_i = 0,
     };
     defer parser.errors.deinit(gpa);
     defer parser.nodes.deinit(gpa);
-    defer parser.extra_data.deinit(gpa);
     defer parser.scratch.deinit(gpa);
 
     // Empirically, Zig source code has a 2:1 ratio of tokens to AST nodes.
@@ -636,21 +704,18 @@ fn recreateNodes(ast: *Ast) Allocator.Error!void {
         .zon => try parser.parseZon(),
     }
 
-    const extra_data = try parser.extra_data.toOwnedSlice(gpa);
-    errdefer gpa.free(extra_data);
     const errors = try parser.errors.toOwnedSlice(gpa);
     errdefer gpa.free(errors);
 
-    ast.*.nodes.deinit(ast.gpa);
-    gpa.free(ast.*.extra_data);
-    gpa.free(ast.*.errors);
-
     ast.*.nodes = parser.nodes.toOwnedSlice();
-    ast.*.extra_data = extra_data;
+    ast.*.xtra_data = parser.extra_data;
+    ast.*.extra_data = parser.extra_data.items[0..];
     ast.*.errors = errors;
+    ast.*.states = parser.states;
 
     if (ast.mode != .standard and errors.len == 0) {
         try ast.markMatchingBraces(gpa, 0, @intCast(ast.tokens.len));
+        ast.initial_brace_matching_done = true;
     }
 }
 
@@ -664,7 +729,7 @@ pub fn markMatchingBraces(
     defer l_braces_i.deinit(gpa);
 
     const ttags = self.tokens.items(.tag);
-    const mbidx = self.txdata.items(.matching_brace_idx);
+    const mbidx = self.tokens.items(.matching_brace_idx);
 
     for (ttags[range_idx_lo..range_idx_hi], range_idx_lo..) |tag, idx| {
         switch (tag) {

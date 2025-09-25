@@ -3,14 +3,60 @@
 pub const Error = error{ParseError} || Allocator.Error;
 
 gpa: Allocator,
+mode: Ast.Mode,
 source: []const u8,
 tokens: Ast.TokenList.Slice,
-txdata: Ast.TokenXdataList.Slice,
+// txdata: Ast.TokenXdataList.Slice,
 tok_i: TokenIndex,
-errors: std.ArrayListUnmanaged(AstError),
+errors: std.ArrayList(AstError),
 nodes: Ast.NodeList,
-extra_data: std.ArrayListUnmanaged(u32),
-scratch: std.ArrayListUnmanaged(Node.Index),
+extra_data: std.ArrayList(u32),
+scratch: std.ArrayList(Node.Index),
+states: InternalStates,
+
+pub const InternalState = struct { // TODO store FieldState
+    nodes_len: u32,
+    xdata_len: u32,
+    token_idx: u32,
+    errors_len: u32,
+
+    pub const zero: @This() = .{ .nodes_len = 0, .xdata_len = 0, .token_ind = 0 };
+
+    /// Initializes and returns an InternalState based on the current parser values
+    /// or 'undefined' if p.mode != .extended
+    pub fn current(p: *Parse) InternalState {
+        return if (p.mode == .extended) .{
+            .nodes_len = @intCast(p.nodes.len),
+            .xdata_len = @intCast(p.extra_data.items.len),
+            .token_idx = p.tok_i,
+            .errors_len = @intCast(p.errors.items.len),
+        } else undefined;
+    }
+
+    /// Initializes and returns an InternalState based on the current parser values
+    /// or 'undefined' if p.mode != .extended
+    pub fn currentBacktrackDocCommentsTokens(p: *Parse, maybe_doc_comment_token_index: ?TokenIndex) InternalState {
+        return if (p.mode == .extended) .{
+            .nodes_len = @intCast(p.nodes.len),
+            .xdata_len = @intCast(p.extra_data.items.len),
+            .token_idx = if (maybe_doc_comment_token_index) |doc_comment_token_index| if (doc_comment_token_index > 0) doc_comment_token_index - 1 else 0 else p.tok_i,
+            .errors_len = @intCast(p.errors.items.len),
+        } else undefined;
+    }
+};
+
+pub const InternalStateRange = struct {
+    head: InternalState,
+    // it's double the data, but less work figuring out a possibly unaffected prev StateRange (make it work, optimize later)
+    tail: InternalState,
+};
+
+pub const RangeAndNode = struct {
+    node_idx: Node.Index,
+    range: InternalStateRange,
+};
+
+pub const InternalStates = std.ArrayList(RangeAndNode);
 
 fn tokenTag(p: *const Parse, token_index: TokenIndex) Token.Tag {
     return p.tokens.items(.tag)[token_index];
@@ -192,12 +238,12 @@ fn failMsg(p: *Parse, msg: Ast.Error) error{ ParseError, OutOfMemory } {
 /// Root <- skip container_doc_comment? ContainerMembers eof
 pub fn parseRoot(p: *Parse) !void {
     // Root node must be index 0.
-    p.nodes.appendAssumeCapacity(.{
+    if (p.nodes.len == 0) p.nodes.appendAssumeCapacity(.{
         .tag = .root,
         .main_token = 0,
         .data = undefined,
     });
-    const root_members = try p.parseContainerMembers();
+    const root_members = try p.parseRootContainerMembers();
     const root_decls = try root_members.toSpan(p);
     if (p.tokenTag(p.tok_i) != .eof) {
         try p.warnExpected(.eof);
@@ -226,6 +272,270 @@ pub fn parseZon(p: *Parse) !void {
         try p.warnExpected(.eof);
     }
     p.nodes.items(.data)[0] = .{ .node = node_index };
+}
+
+fn storeState(p: *Parse, node_idx: Node.Index, head: InternalState, tail: InternalState) Allocator.Error!void {
+    if (p.mode != .extended) return;
+    // std.log.debug("p.storeState: adding: {}", .{.{ .node_idx = node_idx, .range = .{ .head = head, .tail = tail } }});
+    try p.states.append(p.gpa, .{ .node_idx = node_idx, .range = .{ .head = head, .tail = tail } });
+}
+
+const FieldState = union(enum) {
+    /// No fields have been seen.
+    none,
+    /// Currently parsing fields.
+    seen,
+    /// Saw fields and then a declaration after them.
+    /// Payload is first token of previous declaration.
+    end: Node.Index,
+    /// There was a declaration between fields, don't report more errors.
+    err,
+};
+
+/// ContainerMembers <- ContainerDeclaration* (ContainerField COMMA)* (ContainerField / ContainerDeclaration*)
+///
+/// ContainerDeclaration <- TestDecl / ComptimeDecl / doc_comment? KEYWORD_pub? Decl
+///
+/// ComptimeDecl <- KEYWORD_comptime Block
+fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
+    const scratch_top = 0;
+    defer p.scratch.shrinkRetainingCapacity(scratch_top);
+
+    var field_state: FieldState = .none;
+
+    var last_field: TokenIndex = undefined;
+
+    // Skip container doc comments.
+    while (p.eatToken(.container_doc_comment)) |_| {}
+
+    var trailing = false;
+    while (true) {
+        const doc_comment = try p.eatDocComments();
+
+        const pre: InternalState = .current(p);
+
+        switch (p.tokenTag(p.tok_i)) {
+            .keyword_test => {
+                if (doc_comment) |some| {
+                    try p.warnMsg(.{ .tag = .test_doc_comment, .token = some });
+                }
+                const maybe_test_decl_node = try p.expectTestDeclRecoverable();
+                if (maybe_test_decl_node) |test_decl_node| {
+                    if (field_state == .seen) {
+                        field_state = .{ .end = test_decl_node };
+                    }
+                    try p.storeState(test_decl_node, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                    try p.scratch.append(p.gpa, test_decl_node);
+                }
+                trailing = false;
+            },
+            .keyword_comptime => switch (p.tokenTag(p.tok_i + 1)) {
+                .l_brace => {
+                    if (doc_comment) |some| {
+                        try p.warnMsg(.{ .tag = .comptime_doc_comment, .token = some });
+                    }
+                    const comptime_token = p.nextToken();
+                    const opt_block = p.parseBlock() catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.ParseError => blk: {
+                            p.findNextContainerMember();
+                            break :blk null;
+                        },
+                    };
+                    if (opt_block) |block| {
+                        const comptime_node = try p.addNode(.{
+                            .tag = .@"comptime",
+                            .main_token = comptime_token,
+                            .data = .{ .node = block },
+                        });
+                        if (field_state == .seen) {
+                            field_state = .{ .end = comptime_node };
+                        }
+                        try p.storeState(comptime_node, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                        try p.scratch.append(p.gpa, comptime_node);
+                    }
+                    trailing = false;
+                },
+                else => {
+                    const identifier = p.tok_i;
+                    defer last_field = identifier;
+                    const container_field = p.expectContainerField() catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.ParseError => {
+                            p.findNextContainerMember();
+                            continue;
+                        },
+                    };
+                    switch (field_state) {
+                        .none => field_state = .seen,
+                        .err, .seen => {},
+                        .end => |node| {
+                            try p.warnMsg(.{
+                                .tag = .decl_between_fields,
+                                .token = p.nodeMainToken(node),
+                            });
+                            try p.warnMsg(.{
+                                .tag = .previous_field,
+                                .is_note = true,
+                                .token = last_field,
+                            });
+                            try p.warnMsg(.{
+                                .tag = .next_field,
+                                .is_note = true,
+                                .token = identifier,
+                            });
+                            // Continue parsing; error will be reported later.
+                            field_state = .err;
+                        },
+                    }
+                    try p.storeState(container_field, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                    try p.scratch.append(p.gpa, container_field);
+                    switch (p.tokenTag(p.tok_i)) {
+                        .comma => {
+                            p.tok_i += 1;
+                            trailing = true;
+                            continue;
+                        },
+                        .r_brace, .eof => {
+                            trailing = false;
+                            break;
+                        },
+                        else => {},
+                    }
+                    // There is not allowed to be a decl after a field with no comma.
+                    // Report error but recover parser.
+                    try p.warn(.expected_comma_after_field);
+                    p.findNextContainerMember();
+                },
+            },
+            .keyword_pub => {
+                p.tok_i += 1;
+                const opt_top_level_decl = try p.expectTopLevelDeclRecoverable();
+                if (opt_top_level_decl) |top_level_decl| {
+                    if (field_state == .seen) {
+                        field_state = .{ .end = top_level_decl };
+                    }
+                    try p.storeState(top_level_decl, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                    try p.scratch.append(p.gpa, top_level_decl);
+                }
+                trailing = p.tokenTag(p.tok_i - 1) == .semicolon;
+            },
+            .keyword_const,
+            .keyword_var,
+            .keyword_threadlocal,
+            .keyword_export,
+            .keyword_extern,
+            .keyword_inline,
+            .keyword_noinline,
+            .keyword_fn,
+            => {
+                const opt_top_level_decl = try p.expectTopLevelDeclRecoverable();
+                if (opt_top_level_decl) |top_level_decl| {
+                    if (field_state == .seen) {
+                        field_state = .{ .end = top_level_decl };
+                    }
+                    try p.storeState(top_level_decl, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                    try p.scratch.append(p.gpa, top_level_decl);
+                }
+                trailing = p.tokenTag(p.tok_i - 1) == .semicolon;
+            },
+            .eof, .r_brace => {
+                if (doc_comment) |tok| {
+                    try p.warnMsg(.{
+                        .tag = .unattached_doc_comment,
+                        .token = tok,
+                    });
+                }
+                break;
+            },
+            else => {
+                const c_container = p.parseCStyleContainer() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.ParseError => false,
+                };
+                if (c_container) continue;
+
+                const identifier = p.tok_i;
+                defer last_field = identifier;
+                const container_field = p.expectContainerField() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    error.ParseError => {
+                        p.findNextContainerMember();
+                        continue;
+                    },
+                };
+                switch (field_state) {
+                    .none => field_state = .seen,
+                    .err, .seen => {},
+                    .end => |node| {
+                        try p.warnMsg(.{
+                            .tag = .decl_between_fields,
+                            .token = p.nodeMainToken(node),
+                        });
+                        try p.warnMsg(.{
+                            .tag = .previous_field,
+                            .is_note = true,
+                            .token = last_field,
+                        });
+                        try p.warnMsg(.{
+                            .tag = .next_field,
+                            .is_note = true,
+                            .token = identifier,
+                        });
+                        // Continue parsing; error will be reported later.
+                        field_state = .err;
+                    },
+                }
+                try p.storeState(container_field, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                try p.scratch.append(p.gpa, container_field);
+                switch (p.tokenTag(p.tok_i)) {
+                    .comma => {
+                        p.tok_i += 1;
+                        trailing = true;
+                        continue;
+                    },
+                    .r_brace, .eof => {
+                        trailing = false;
+                        break;
+                    },
+                    else => {},
+                }
+                // There is not allowed to be a decl after a field with no comma.
+                // Report error but recover parser.
+                try p.warn(.expected_comma_after_field);
+                if (p.tokenTag(p.tok_i) == .semicolon and p.tokenTag(identifier) == .identifier) {
+                    try p.warnMsg(.{
+                        .tag = .var_const_decl,
+                        .is_note = true,
+                        .token = identifier,
+                    });
+                }
+                p.findNextContainerMember();
+                continue;
+            },
+        }
+    }
+
+    // std.log.debug("parser: states keys:\n{any}", .{p.states.keys()});
+    // std.log.debug("parser: states vals:\n{any}", .{p.states.values()});
+
+    const items = p.scratch.items[scratch_top..];
+    if (items.len <= 2) {
+        return Members{
+            .len = items.len,
+            .data = .{ .opt_node_and_opt_node = .{
+                if (items.len >= 1) items[0].toOptional() else .none,
+                if (items.len >= 2) items[1].toOptional() else .none,
+            } },
+            .trailing = trailing,
+        };
+    } else {
+        return Members{
+            .len = items.len,
+            .data = .{ .extra_range = try p.listToSpan(items) },
+            .trailing = trailing,
+        };
+    }
 }
 
 /// ContainerMembers <- ContainerDeclaration* (ContainerField COMMA)* (ContainerField / ContainerDeclaration*)

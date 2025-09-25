@@ -259,7 +259,7 @@ pub const Handle = struct {
         const kind: CustomAst.Kind = if (std.mem.eql(u8, std.fs.path.extension(uri), ".zon")) .zon else .zig;
 
         var custom_ast = try createAst(allocator, text, kind, lsp_synced);
-        errdefer custom_ast.deinit(allocator);
+        errdefer custom_ast.destroy();
 
         const std_ast = custom_ast.toStdAst();
 
@@ -309,7 +309,7 @@ pub const Handle = struct {
         const allocator = self.impl.allocator;
 
         self.deinitAstDeps();
-        self.ast.deinit(allocator);
+        self.ast.destroy();
 
         switch (self.impl.associated_build_file) {
             .init, .none, .resolved => {},
