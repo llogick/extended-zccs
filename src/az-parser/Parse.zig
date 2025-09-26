@@ -46,9 +46,9 @@ pub const InternalState = struct { // TODO store FieldState
 };
 
 pub const InternalStateRange = struct {
-    head: InternalState,
+    pre: InternalState,
     // it's double the data, but less work figuring out a possibly unaffected prev StateRange (make it work, optimize later)
-    tail: InternalState,
+    aft: InternalState,
 };
 
 pub const RangeAndNode = struct {
@@ -274,10 +274,9 @@ pub fn parseZon(p: *Parse) !void {
     p.nodes.items(.data)[0] = .{ .node = node_index };
 }
 
-fn storeState(p: *Parse, node_idx: Node.Index, head: InternalState, tail: InternalState) Allocator.Error!void {
+fn storeState(p: *Parse, node_idx: Node.Index, pre: InternalState, aft: InternalState) Allocator.Error!void {
     if (p.mode != .extended) return;
-    // std.log.debug("p.storeState: adding: {}", .{.{ .node_idx = node_idx, .range = .{ .head = head, .tail = tail } }});
-    try p.states.append(p.gpa, .{ .node_idx = node_idx, .range = .{ .head = head, .tail = tail } });
+    try p.states.append(p.gpa, .{ .node_idx = node_idx, .range = .{ .pre = pre, .aft = aft } });
 }
 
 const FieldState = union(enum) {
@@ -306,13 +305,13 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
     var last_field: TokenIndex = undefined;
 
     // Skip container doc comments.
-    while (p.eatToken(.container_doc_comment)) |_| {}
+    if (p.tok_i == 0) while (p.eatToken(.container_doc_comment)) |_| {};
 
     var trailing = false;
     while (true) {
-        const doc_comment = try p.eatDocComments();
+        const pre: InternalState = .current(p); // treat doc_comment(s) as part of the root_decl for now
 
-        const pre: InternalState = .current(p);
+        const doc_comment = try p.eatDocComments();
 
         switch (p.tokenTag(p.tok_i)) {
             .keyword_test => {
@@ -324,7 +323,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                     if (field_state == .seen) {
                         field_state = .{ .end = test_decl_node };
                     }
-                    try p.storeState(test_decl_node, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                    try p.storeState(test_decl_node, pre, .current(p));
                     try p.scratch.append(p.gpa, test_decl_node);
                 }
                 trailing = false;
@@ -351,7 +350,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                         if (field_state == .seen) {
                             field_state = .{ .end = comptime_node };
                         }
-                        try p.storeState(comptime_node, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                        try p.storeState(comptime_node, pre, .current(p));
                         try p.scratch.append(p.gpa, comptime_node);
                     }
                     trailing = false;
@@ -388,7 +387,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                             field_state = .err;
                         },
                     }
-                    try p.storeState(container_field, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                    try p.storeState(container_field, pre, .current(p));
                     try p.scratch.append(p.gpa, container_field);
                     switch (p.tokenTag(p.tok_i)) {
                         .comma => {
@@ -415,7 +414,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                     if (field_state == .seen) {
                         field_state = .{ .end = top_level_decl };
                     }
-                    try p.storeState(top_level_decl, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                    try p.storeState(top_level_decl, pre, .current(p));
                     try p.scratch.append(p.gpa, top_level_decl);
                 }
                 trailing = p.tokenTag(p.tok_i - 1) == .semicolon;
@@ -434,7 +433,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                     if (field_state == .seen) {
                         field_state = .{ .end = top_level_decl };
                     }
-                    try p.storeState(top_level_decl, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                    try p.storeState(top_level_decl, pre, .current(p));
                     try p.scratch.append(p.gpa, top_level_decl);
                 }
                 trailing = p.tokenTag(p.tok_i - 1) == .semicolon;
@@ -486,7 +485,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                         field_state = .err;
                     },
                 }
-                try p.storeState(container_field, pre, .currentBacktrackDocCommentsTokens(p, doc_comment));
+                try p.storeState(container_field, pre, .current(p));
                 try p.scratch.append(p.gpa, container_field);
                 switch (p.tokenTag(p.tok_i)) {
                     .comma => {
@@ -547,17 +546,7 @@ fn parseContainerMembers(p: *Parse) Allocator.Error!Members {
     const scratch_top = p.scratch.items.len;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
-    var field_state: union(enum) {
-        /// No fields have been seen.
-        none,
-        /// Currently parsing fields.
-        seen,
-        /// Saw fields and then a declaration after them.
-        /// Payload is first token of previous declaration.
-        end: Node.Index,
-        /// There was a declaration between fields, don't report more errors.
-        err,
-    } = .none;
+    var field_state: FieldState = .none;
 
     var last_field: TokenIndex = undefined;
 

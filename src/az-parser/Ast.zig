@@ -598,36 +598,25 @@ pub fn update(
 fn reuseRootDecls(ast: *Ast, indices: AffectedIndices) Allocator.Error!bool {
     // if (true) return false;
     if (ast.*.states.items.len < 2) return false; // Nothing to reuse
-    const first_affected_root_decl_idx = for (ast.*.states.items, 0..) |state, root_decl_idx| {
-        const tail = state.range.tail;
-        if (tail.token_idx < indices.tok_idx_lo and tail.errors_len == 0) continue;
+    const root_decl_idx = for (ast.*.states.items, 0..) |state, root_decl_idx| {
+        const aft = state.range.aft;
+        if (indices.tok_idx_lo > aft.token_idx and aft.errors_len == 0) continue;
         if (root_decl_idx == 0) return false;
         // std.log.debug("affected root_decl_idx: {} state:\n{}", .{ root_decl_idx, state });
-        // if token_idx is between two root_decls grab the previous one (trust me)
-        break if (indices.tok_idx_lo < state.range.head.token_idx) root_decl_idx - 1 else root_decl_idx;
+        break root_decl_idx - 1;
     } else return false;
-
-    // std.log.debug("ast.states pre: {}", .{ast.states});
 
     const gpa = ast.gpa;
 
-    // We _cannot_ use the tail state of the prev node due to fns reserving nodes and messing with tail state
-
-    const affected_node_state = ast.states.items[first_affected_root_decl_idx];
-    if (!(affected_node_state.range.head.token_idx < ast.tokens.len)) return false;
+    const state = ast.states.items[root_decl_idx];
+    if (!(state.range.pre.token_idx < ast.tokens.len)) return false; // XXX is this really a possibility?
 
     var scratch: std.ArrayList(Node.Index) = try .initCapacity(gpa, ast.states.items.len);
-    ast.states.items.len = first_affected_root_decl_idx;
-    for (ast.*.states.items) |state| scratch.appendAssumeCapacity(state.node_idx);
+    ast.states.items.len = root_decl_idx;
+    for (ast.*.states.items) |pstate| scratch.appendAssumeCapacity(pstate.node_idx);
 
-    ast.nodes.len = affected_node_state.range.head.nodes_len;
-    ast.xtra_data.items.len = affected_node_state.range.head.xdata_len;
-
-    // TODO Handle(preserve) errors better
-    // test case
-    // <root decls>
-    // //! <- do this => "expected ..., found a doc_comment"
-    // <root decls> <- then introduce a syntax error in one of the root_decls here -> error dissapears
+    ast.nodes.len = state.range.pre.nodes_len;
+    ast.xtra_data.items.len = state.range.pre.xdata_len;
 
     var parser: Parse = .{
         .gpa = gpa,
@@ -639,10 +628,8 @@ fn reuseRootDecls(ast: *Ast, indices: AffectedIndices) Allocator.Error!bool {
         .extra_data = ast.xtra_data,
         .scratch = scratch,
         .states = ast.states,
-        .tok_i = affected_node_state.range.head.token_idx,
+        .tok_i = state.range.pre.token_idx,
     };
-
-    // std.log.debug("P: {}", .{parser});
 
     defer parser.errors.deinit(gpa);
     defer parser.scratch.deinit(gpa);
@@ -662,10 +649,6 @@ fn reuseRootDecls(ast: *Ast, indices: AffectedIndices) Allocator.Error!bool {
     ast.*.extra_data = parser.extra_data.items[0..];
     ast.*.errors = errors;
     ast.*.states = parser.states;
-
-    // std.log.debug("ast.states aft: {}", .{ast.states});
-
-    // std.log.debug("reused", .{});
 
     return true;
 }
