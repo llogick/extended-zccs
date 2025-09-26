@@ -14,11 +14,19 @@ extra_data: std.ArrayList(u32),
 scratch: std.ArrayList(Node.Index),
 states: InternalStates,
 
+/// These are used only while parsing root decls, subcontainers use dedicated stack vars.
+/// Required so we can correctly emit .decl_between_fields, .previous_field and .next_field,
+/// (Given that we reparse only a subrange or root decls, we need to know the previous states of these values for ranges we don't reparse)
+field_state: FieldState = .none,
+last_field: TokenIndex = undefined,
+
 pub const InternalState = struct { // TODO store FieldState
     nodes_len: u32,
     xdata_len: u32,
     token_idx: u32,
     errors_len: u32,
+    field_state: FieldState,
+    last_field: TokenIndex,
 
     pub const zero: @This() = .{ .nodes_len = 0, .xdata_len = 0, .token_ind = 0 };
 
@@ -30,6 +38,8 @@ pub const InternalState = struct { // TODO store FieldState
             .xdata_len = @intCast(p.extra_data.items.len),
             .token_idx = p.tok_i,
             .errors_len = @intCast(p.errors.items.len),
+            .field_state = p.field_state,
+            .last_field = p.last_field,
         } else undefined;
     }
 
@@ -41,6 +51,8 @@ pub const InternalState = struct { // TODO store FieldState
             .xdata_len = @intCast(p.extra_data.items.len),
             .token_idx = if (maybe_doc_comment_token_index) |doc_comment_token_index| if (doc_comment_token_index > 0) doc_comment_token_index - 1 else 0 else p.tok_i,
             .errors_len = @intCast(p.errors.items.len),
+            .field_state = p.field_state,
+            .last_field = p.last_field,
         } else undefined;
     }
 };
@@ -300,10 +312,6 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
     const scratch_top = 0;
     defer p.scratch.shrinkRetainingCapacity(scratch_top);
 
-    var field_state: FieldState = .none;
-
-    var last_field: TokenIndex = undefined;
-
     // Skip container doc comments.
     if (p.tok_i == 0) while (p.eatToken(.container_doc_comment)) |_| {};
 
@@ -320,8 +328,8 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                 }
                 const maybe_test_decl_node = try p.expectTestDeclRecoverable();
                 if (maybe_test_decl_node) |test_decl_node| {
-                    if (field_state == .seen) {
-                        field_state = .{ .end = test_decl_node };
+                    if (p.field_state == .seen) {
+                        p.field_state = .{ .end = test_decl_node };
                     }
                     try p.storeState(test_decl_node, pre, .current(p));
                     try p.scratch.append(p.gpa, test_decl_node);
@@ -347,8 +355,8 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                             .main_token = comptime_token,
                             .data = .{ .node = block },
                         });
-                        if (field_state == .seen) {
-                            field_state = .{ .end = comptime_node };
+                        if (p.field_state == .seen) {
+                            p.field_state = .{ .end = comptime_node };
                         }
                         try p.storeState(comptime_node, pre, .current(p));
                         try p.scratch.append(p.gpa, comptime_node);
@@ -357,7 +365,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                 },
                 else => {
                     const identifier = p.tok_i;
-                    defer last_field = identifier;
+                    defer p.last_field = identifier;
                     const container_field = p.expectContainerField() catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
                         error.ParseError => {
@@ -365,8 +373,8 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                             continue;
                         },
                     };
-                    switch (field_state) {
-                        .none => field_state = .seen,
+                    switch (p.field_state) {
+                        .none => p.field_state = .seen,
                         .err, .seen => {},
                         .end => |node| {
                             try p.warnMsg(.{
@@ -376,7 +384,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                             try p.warnMsg(.{
                                 .tag = .previous_field,
                                 .is_note = true,
-                                .token = last_field,
+                                .token = p.last_field,
                             });
                             try p.warnMsg(.{
                                 .tag = .next_field,
@@ -384,7 +392,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                                 .token = identifier,
                             });
                             // Continue parsing; error will be reported later.
-                            field_state = .err;
+                            p.field_state = .err;
                         },
                     }
                     try p.storeState(container_field, pre, .current(p));
@@ -411,8 +419,8 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                 p.tok_i += 1;
                 const opt_top_level_decl = try p.expectTopLevelDeclRecoverable();
                 if (opt_top_level_decl) |top_level_decl| {
-                    if (field_state == .seen) {
-                        field_state = .{ .end = top_level_decl };
+                    if (p.field_state == .seen) {
+                        p.field_state = .{ .end = top_level_decl };
                     }
                     try p.storeState(top_level_decl, pre, .current(p));
                     try p.scratch.append(p.gpa, top_level_decl);
@@ -430,8 +438,8 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
             => {
                 const opt_top_level_decl = try p.expectTopLevelDeclRecoverable();
                 if (opt_top_level_decl) |top_level_decl| {
-                    if (field_state == .seen) {
-                        field_state = .{ .end = top_level_decl };
+                    if (p.field_state == .seen) {
+                        p.field_state = .{ .end = top_level_decl };
                     }
                     try p.storeState(top_level_decl, pre, .current(p));
                     try p.scratch.append(p.gpa, top_level_decl);
@@ -455,7 +463,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                 if (c_container) continue;
 
                 const identifier = p.tok_i;
-                defer last_field = identifier;
+                defer p.last_field = identifier;
                 const container_field = p.expectContainerField() catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.ParseError => {
@@ -463,8 +471,8 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                         continue;
                     },
                 };
-                switch (field_state) {
-                    .none => field_state = .seen,
+                switch (p.field_state) {
+                    .none => p.field_state = .seen,
                     .err, .seen => {},
                     .end => |node| {
                         try p.warnMsg(.{
@@ -474,7 +482,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                         try p.warnMsg(.{
                             .tag = .previous_field,
                             .is_note = true,
-                            .token = last_field,
+                            .token = p.last_field,
                         });
                         try p.warnMsg(.{
                             .tag = .next_field,
@@ -482,7 +490,7 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
                             .token = identifier,
                         });
                         // Continue parsing; error will be reported later.
-                        field_state = .err;
+                        p.field_state = .err;
                     },
                 }
                 try p.storeState(container_field, pre, .current(p));
@@ -514,9 +522,6 @@ fn parseRootContainerMembers(p: *Parse) Allocator.Error!Members {
             },
         }
     }
-
-    // std.log.debug("parser: states keys:\n{any}", .{p.states.keys()});
-    // std.log.debug("parser: states vals:\n{any}", .{p.states.values()});
 
     const items = p.scratch.items[scratch_top..];
     if (items.len <= 2) {

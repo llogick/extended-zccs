@@ -629,6 +629,8 @@ fn reuseRootDecls(ast: *Ast, indices: AffectedIndices) Allocator.Error!bool {
         .scratch = scratch,
         .states = ast.states,
         .tok_i = state.range.pre.token_idx,
+        .field_state = state.range.pre.field_state,
+        .last_field = state.range.pre.last_field,
     };
 
     defer parser.errors.deinit(gpa);
