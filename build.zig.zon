@@ -1,0 +1,15 @@
+.{
+    .name = .extended_zccs,
+    .version = "0.16.0-dev",
+    .fingerprint = 0xbebc9980369446cc, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0-dev.1990+5bf52a6f5",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "LICENSE-ZIG",
+        "README.md",
+        "src",
+    },
+}
