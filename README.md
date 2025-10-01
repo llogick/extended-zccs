@@ -1,3 +1,7 @@
+## Project Stage: Prototype - *Exploring structure, algorithms, and implementation. Everything is subject to change.*
+
+## Motivation
+
 The standard Zig parser is no slouch,  
 but it’s a full-document parser — reprocessing the entire document from scratch for every edit.
 
