@@ -185,7 +185,11 @@ pub fn generate(gpa: Allocator, tree: Ast, change_pending: *std.atomic.Value(boo
         const imports_index = @intFromEnum(Zir.ExtraIndex.imports);
         astgen.extra.items[imports_index] = 0;
         return .{
-            .instructions = .empty,
+            .instructions = .{
+                .ptrs = undefined,
+                .len = 1, // XXX ..., in order to avoid a couple of asserts in Zir.zig
+                .capacity = 0,
+            },
             .string_bytes = try astgen.string_bytes.toOwnedSlice(gpa),
             .extra = try astgen.extra.toOwnedSlice(gpa),
         };
@@ -264,10 +268,8 @@ pub fn generate(gpa: Allocator, tree: Ast, change_pending: *std.atomic.Value(boo
         }
     }
 
-    _ = fatal;
-
     return .{
-        .instructions = .empty, //if (fatal) .empty else astgen.instructions.toOwnedSlice(),
+        .instructions = if (fatal) .empty else astgen.instructions.toOwnedSlice(),
         .string_bytes = try astgen.string_bytes.toOwnedSlice(gpa),
         .extra = try astgen.extra.toOwnedSlice(gpa),
     };
