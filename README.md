@@ -40,6 +40,19 @@ NOTE: **Uplift numbers** are based on small edits. Performance may vary for larg
     - modifying existing identifiers, ie edits that don't introduce parse errors
     - distant third: ast-check errors past the 50% mark of a large document
 
+## Try It Out
+
+Take [a tailored version of ZLS](https://github.com/llogick/zls/tree/zls-016-dev-faster-doc-edits) for a spin and discover if it enhances your editing experience    
+
+**Keep in Mind:**  
+Half (50%) of a small number, is an even smaller number — for tiny files or on capable hardware, the speed-up might be imperceptible.  
+
+**Suggested Test Files:**
+- Your own project files / files you are familiar with
+- https://github.com/ziglang/zig/blob/master/src/Sema.zig
+- https://github.com/ziglang/zig/blob/master/src/codegen/x86_64/CodeGen.zig     
+    (will stress test your editor as well)
+
 
 ## License
 
