@@ -29,6 +29,20 @@ NOTE: **Uplift numbers** are based on small edits. Performance may vary for larg
 
     High complexity. Aims to ensure flat latency across all edit locations for a G1 + 40% total uplift. 
 
+- [x] Specialized AstCheck component
+
+    - Early Exit Support: Checks a thread-safe flag, `change_pending: *std.atomic.Value(bool)`,     
+      early in `generate()` and in the `container_decl.ast.members` loop in `structDeclInner()`
+
+    - Empty Instructions: Always sets ResultT.instructions = .empty
+
+    Given that AstCheck shouldn't be called when ast.errors.len != 0, the cases that benefit are:  
+    
+    - rapidly inserting new lines
+    - modifying existing identifiers, ie edits that don't introduce parse errors
+    - distant third: ast-check errors past the 50% mark of a large document
+
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
