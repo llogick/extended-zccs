@@ -187,7 +187,7 @@ pub fn generate(gpa: Allocator, tree: Ast, change_pending: *std.atomic.Value(boo
         return .{
             .instructions = .{
                 .ptrs = undefined,
-                .len = 1, // XXX ..., in order to avoid a couple of asserts in Zir.zig
+                .len = 1, // XXX (this is too much even for me ...) needed in order to avoid a couple of asserts in Zir.zig
                 .capacity = 0,
             },
             .string_bytes = try astgen.string_bytes.toOwnedSlice(gpa),
@@ -268,8 +268,14 @@ pub fn generate(gpa: Allocator, tree: Ast, change_pending: *std.atomic.Value(boo
         }
     }
 
+    _ = fatal;
+
     return .{
-        .instructions = if (fatal) .empty else astgen.instructions.toOwnedSlice(),
+        .instructions = .{
+            .ptrs = undefined,
+            .len = 1, // XXX (this is too much even for me ...) needed in order to avoid a couple of asserts in Zir.zig
+            .capacity = 0,
+        }, //if (fatal) .empty else astgen.instructions.toOwnedSlice(),
         .string_bytes = try astgen.string_bytes.toOwnedSlice(gpa),
         .extra = try astgen.extra.toOwnedSlice(gpa),
     };

@@ -32,7 +32,10 @@ NOTE: **Uplift numbers** are based on small edits. Performance may vary for larg
 - [x] Specialized AstCheck component
 
     - Early Exit Support: Checks a thread-safe flag, `change_pending: *std.atomic.Value(bool)`,     
-      early in `generate()` and in the `container_decl.ast.members` loop in `structDeclInner()`
+      early in `generate()` and in the `container_decl.ast.members` loop in `structDeclInner()`    
+
+    - -= IMPORTANT =- Given that `AstCheck.generate()` may return early,   
+        **The `.instructions` field of the AstCheck result should always be treated as *undefined***
 
     Given that AstCheck shouldn't be called when ast.errors.len != 0, the cases that benefit are:  
     
