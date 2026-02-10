@@ -178,7 +178,7 @@ pub fn generate(gpa: Allocator, tree: Ast, change_pending: *std.atomic.Value(boo
     astgen.extra.items.len += reserved_count;
 
     if (change_pending.load(.acquire) == true) {
-        std.log.err("!AstCheck : early exit", .{});
+        // std.log.err("!AstCheck : early exit", .{});
         const err_index = @intFromEnum(Zir.ExtraIndex.compile_errors);
         astgen.extra.items[err_index] = 0;
         const imports_index = @intFromEnum(Zir.ExtraIndex.imports);
