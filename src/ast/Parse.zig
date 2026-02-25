@@ -3501,6 +3501,7 @@ fn parseSwitchProng(p: *Parse) !?Node.Index {
                     if (p.tokenTag(p.tok_i + 1) == .period and switch (p.tokenTag(p.tok_i + 2)) {
                         .keyword_else,
                         .keyword_error, // `error.<cursor>\nerror.E => ..`, ie when preceding another entry
+                        .r_brace, // `error.}`, ie single/last entry
                         => true,
                         else => false,
                     }) { // custom
