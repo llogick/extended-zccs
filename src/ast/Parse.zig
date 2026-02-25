@@ -3483,23 +3483,35 @@ fn parseSwitchProng(p: *Parse) !?Node.Index {
 
     if (p.eatToken(.keyword_else) == null) blk: {
         while (true) {
-            if (p.tokenTag(p.tok_i) == .period and p.tokenTag(p.tok_i + 1) == .keyword_else) { // custom
-                try p.warn(.expected_expr);
-                p.tok_i += 2;
-                break :blk;
-            }
-            if (p.tokenTag(p.tok_i) == .period and p.tokenTag(p.tok_i + 1) == .period) { // custom
-                try p.warn(.expected_expr);
-                p.tok_i += 1;
-            }
-            if (p.tokenTag(p.tok_i) == .keyword_error and p.tokenTag(p.tok_i + 1) == .period and switch (p.tokenTag(p.tok_i + 2)) {
-                .keyword_error, // `error.<cursor>\nerror.E => ..`, ie when preceding another entry
-                .r_brace, // `error.}`, ie single/last entry
-                => true,
-                else => false,
-            }) { // custom
-                try p.warn(.expected_expr);
-                p.tok_i += 2;
+            switch (p.tokenTag(p.tok_i)) { // custom
+                else => {},
+                .period => switch (p.tokenTag(p.tok_i + 1)) {
+                    else => {},
+                    .keyword_else => {
+                        try p.warn(.expected_expr);
+                        p.tok_i += 2; // see arrow_token = expect .. below
+                        break :blk;
+                    },
+                    .period, .keyword_error => {
+                        try p.warn(.expected_expr);
+                        p.tok_i += 1;
+                    },
+                },
+                .keyword_error => {
+                    if (p.tokenTag(p.tok_i + 1) == .period and switch (p.tokenTag(p.tok_i + 2)) {
+                        .keyword_else,
+                        .keyword_error, // `error.<cursor>\nerror.E => ..`, ie when preceding another entry
+                        => true,
+                        else => false,
+                    }) { // custom
+                        try p.warn(.expected_expr);
+                        p.tok_i += 2;
+                        if (p.tokenTag(p.tok_i) == .keyword_else) {
+                            p.tok_i += 1;
+                            break :blk;
+                        }
+                    }
+                },
             }
             const item = try p.parseSwitchItem() orelse break;
             try p.scratch.append(p.gpa, item);
