@@ -5073,6 +5073,11 @@ fn structDeclInner(
     var any_aligned_fields = false;
     var any_default_inits = false;
     for (container_decl.ast.members) |member_node| {
+        if (astgen.change_pending.load(.acquire) == true) {
+            // std.log.err("!AstCheck : loop exit", .{});
+            return error.AnalysisFail;
+        }
+
         var member = switch (try containerMember(&block_scope, &namespace.base, &wip_members, member_node)) {
             .decl => continue,
             .field => |field| field,
