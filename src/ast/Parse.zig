@@ -1190,7 +1190,8 @@ fn expectContainerField(p: *Parse) !Node.Index {
             .tag = .container_field,
             .main_token = main_token,
             .data = .{ .node_and_extra = .{
-                type_expr, try p.addExtra(Node.ContainerField{
+                type_expr,
+                try p.addExtra(Node.ContainerField{
                     .align_expr = align_expr.?,
                     .value_expr = value_expr.?,
                 }),
@@ -1224,11 +1225,15 @@ fn expectStatement(p: *Parse, allow_defer_var: bool) Error!Node.Index {
         } else {
             const assign = try p.expectAssignExpr();
             try p.expectSemicolon(.expected_semi_after_stmt, true);
-            return p.addNode(.{
-                .tag = .@"comptime",
-                .main_token = comptime_token,
-                .data = .{ .node = assign },
-            });
+            if (p.nodeTag(assign) != .assign_destructure) {
+                return p.addNode(.{
+                    .tag = .@"comptime",
+                    .main_token = comptime_token,
+                    .data = .{ .node = assign },
+                });
+            } else {
+                return assign;
+            }
         }
     }
 
@@ -1489,7 +1494,8 @@ fn expectIfStatement(p: *Parse) !Node.Index {
         .tag = .@"if",
         .main_token = if_token,
         .data = .{ .node_and_extra = .{
-            condition, try p.addExtra(Node.If{
+            condition,
+            try p.addExtra(Node.If{
                 .then_expr = then_expr,
                 .else_expr = else_expr,
             }),
@@ -1670,7 +1676,8 @@ fn parseWhileStatement(p: *Parse) !?Node.Index {
         .tag = .@"while",
         .main_token = while_token,
         .data = .{ .node_and_extra = .{
-            condition, try p.addExtra(Node.While{
+            condition,
+            try p.addExtra(Node.While{
                 .cont_expr = .fromOptional(cont_expr),
                 .then_expr = then_expr,
                 .else_expr = else_expr,
@@ -2249,7 +2256,8 @@ fn parseTypeExpr(p: *Parse) Error!?Node.Index {
                             .tag = .array_type_sentinel,
                             .main_token = lbracket,
                             .data = .{ .node_and_extra = .{
-                                len_expr.?, try p.addExtra(Node.ArrayTypeSentinel{
+                                len_expr.?,
+                                try p.addExtra(Node.ArrayTypeSentinel{
                                     .sentinel = sentinel.?,
                                     .elem_type = elem_type,
                                 }),
@@ -3153,7 +3161,8 @@ fn parseWhileTypeExpr(p: *Parse) !?Node.Index {
                 .tag = .while_cont,
                 .main_token = while_token,
                 .data = .{ .node_and_extra = .{
-                    condition, try p.addExtra(Node.WhileCont{
+                    condition,
+                    try p.addExtra(Node.WhileCont{
                         .cont_expr = cont_expr.?,
                         .then_expr = then_expr,
                     }),
@@ -3167,7 +3176,8 @@ fn parseWhileTypeExpr(p: *Parse) !?Node.Index {
         .tag = .@"while",
         .main_token = while_token,
         .data = .{ .node_and_extra = .{
-            condition, try p.addExtra(Node.While{
+            condition,
+            try p.addExtra(Node.While{
                 .cont_expr = .fromOptional(cont_expr),
                 .then_expr = then_expr,
                 .else_expr = else_expr,
@@ -3662,7 +3672,8 @@ fn parseSuffixOp(p: *Parse, lhs: Node.Index) !?Node.Index {
                         .tag = .slice_sentinel,
                         .main_token = lbracket,
                         .data = .{ .node_and_extra = .{
-                            lhs, try p.addExtra(Node.SliceSentinel{
+                            lhs,
+                            try p.addExtra(Node.SliceSentinel{
                                 .start = index_expr,
                                 .end = .fromOptional(opt_end_expr),
                                 .sentinel = sentinel,
@@ -3685,7 +3696,8 @@ fn parseSuffixOp(p: *Parse, lhs: Node.Index) !?Node.Index {
                     .tag = .slice,
                     .main_token = lbracket,
                     .data = .{ .node_and_extra = .{
-                        lhs, try p.addExtra(Node.Slice{
+                        lhs,
+                        try p.addExtra(Node.Slice{
                             .start = index_expr,
                             .end = end_expr,
                         }),
