@@ -925,13 +925,13 @@ fn expectTopLevelDecl(p: *Parse) !?Node.Index {
                 const fn_decl_index = try p.reserveNode(.fn_decl);
                 errdefer p.unreserveNode(fn_decl_index);
 
-                const body_block = try p.parseBlock() orelse return null;
+                const body_block = try p.parseBlock();
                 return p.setNode(fn_decl_index, .{
                     .tag = .fn_decl,
                     .main_token = p.nodeMainToken(fn_proto),
                     .data = .{ .node_and_node = .{
                         fn_proto,
-                        body_block,
+                        body_block.?,
                     } },
                 });
             },
@@ -2132,10 +2132,15 @@ fn parseTypeExpr(p: *Parse) Error!?Node.Index {
                 _ = try p.expectToken(.r_bracket);
                 const mods = try p.parsePtrModifiers();
                 const elem_type = try p.expectTypeExpr();
-                if (mods.bit_range_start == .none) {
-                    if (sentinel == null and mods.addrspace_node == .none) {
-                        return try p.addNode(.{
-                            .tag = .ptr_type_aligned,
+                if (mods.bit_range_start.unwrap()) |bit_range_start| {
+                    try p.warnMsg(.{
+                        .tag = .invalid_bit_range,
+                        .token = p.nodeMainToken(bit_range_start),
+                    });
+                }
+                if (sentinel == null and mods.addrspace_node == .none) {
+                    return try p.addNode(.{
+                        .tag = .ptr_type_aligned,
                             .main_token = l_bracket,
                             .data = .{ .opt_node_and_node = .{
                                 mods.align_node,
@@ -2162,22 +2167,6 @@ fn parseTypeExpr(p: *Parse) Error!?Node.Index {
                                     .addrspace_node = mods.addrspace_node,
                                 }),
                                 elem_type,
-                            } },
-                        });
-                    }
-                } else {
-                    return try p.addNode(.{
-                        .tag = .ptr_type_bit_range,
-                        .main_token = l_bracket,
-                        .data = .{ .extra_and_node = .{
-                            try p.addExtra(Node.PtrTypeBitRange{
-                                .sentinel = .fromOptional(sentinel),
-                                .align_node = mods.align_node.unwrap().?,
-                                .addrspace_node = mods.addrspace_node,
-                                .bit_range_start = mods.bit_range_start.unwrap().?,
-                                .bit_range_end = mods.bit_range_end.unwrap().?,
-                            }),
-                            elem_type,
                         } },
                     });
                 }
@@ -2821,7 +2810,7 @@ fn parseSuffixExpr(p: *Parse) !?Node.Index {
 ///
 /// ContainerDecl <- (KEYWORD_extern / KEYWORD_packed)? ContainerDeclAuto
 ///
-/// ContainerDeclAuto <- ContainerDeclType LBRACE container_doc_comment? ContainerMembers RBRACE
+/// ContainerDeclAuto <- ContainerDeclType LBRACE ContainerMembers RBRACE
 ///
 /// InitList
 ///     <- LBRACE FieldInit (COMMA FieldInit)* COMMA? RBRACE
@@ -3760,7 +3749,7 @@ fn parseSuffixOp(p: *Parse, lhs: Node.Index) !?Node.Index {
 
 /// Caller must have already verified the first token.
 ///
-/// ContainerDeclAuto <- ContainerDeclType LBRACE container_doc_comment? ContainerMembers RBRACE
+/// ContainerDeclAuto <- ContainerDeclType LBRACE ContainerMembers RBRACE
 ///
 /// ContainerDeclType
 ///     <- KEYWORD_struct (LPAREN Expr RPAREN)?
@@ -4129,7 +4118,7 @@ fn eatDocComments(p: *Parse) Allocator.Error!?TokenIndex {
 }
 
 fn tokensOnSameLine(p: *Parse, token1: TokenIndex, token2: TokenIndex) bool {
-    return std.mem.indexOfScalar(u8, p.source[p.tokenStart(token1)..p.tokenStart(token2)], '\n') == null;
+    return std.mem.findScalar(u8, p.source[p.tokenStart(token1)..p.tokenStart(token2)], '\n') == null;
 }
 
 fn eatToken(p: *Parse, tag: Token.Tag) ?TokenIndex {
