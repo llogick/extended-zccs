@@ -2141,32 +2141,32 @@ fn parseTypeExpr(p: *Parse) Error!?Node.Index {
                 if (sentinel == null and mods.addrspace_node == .none) {
                     return try p.addNode(.{
                         .tag = .ptr_type_aligned,
-                            .main_token = l_bracket,
-                            .data = .{ .opt_node_and_node = .{
-                                mods.align_node,
-                                elem_type,
-                            } },
-                        });
-                    } else if (mods.align_node == .none and mods.addrspace_node == .none) {
-                        return try p.addNode(.{
-                            .tag = .ptr_type_sentinel,
-                            .main_token = l_bracket,
-                            .data = .{ .opt_node_and_node = .{
-                                .fromOptional(sentinel),
-                                elem_type,
-                            } },
-                        });
-                    } else {
-                        return try p.addNode(.{
-                            .tag = .ptr_type,
-                            .main_token = l_bracket,
-                            .data = .{ .extra_and_node = .{
-                                try p.addExtra(Node.PtrType{
-                                    .sentinel = .fromOptional(sentinel),
-                                    .align_node = mods.align_node,
-                                    .addrspace_node = mods.addrspace_node,
-                                }),
-                                elem_type,
+                        .main_token = l_bracket,
+                        .data = .{ .opt_node_and_node = .{
+                            mods.align_node,
+                            elem_type,
+                        } },
+                    });
+                } else if (mods.align_node == .none and mods.addrspace_node == .none) {
+                    return try p.addNode(.{
+                        .tag = .ptr_type_sentinel,
+                        .main_token = l_bracket,
+                        .data = .{ .opt_node_and_node = .{
+                            .fromOptional(sentinel),
+                            elem_type,
+                        } },
+                    });
+                } else {
+                    return try p.addNode(.{
+                        .tag = .ptr_type,
+                        .main_token = l_bracket,
+                        .data = .{ .extra_and_node = .{
+                            try p.addExtra(Node.PtrType{
+                                .sentinel = .fromOptional(sentinel),
+                                .align_node = mods.align_node,
+                                .addrspace_node = mods.addrspace_node,
+                            }),
+                            elem_type,
                         } },
                     });
                 }
@@ -3344,7 +3344,7 @@ fn parseAsmInputItem(p: *Parse) !?Node.Index {
 /// BreakLabel <- COLON IDENTIFIER
 fn parseBreakLabel(p: *Parse) Error!OptionalTokenIndex {
     _ = p.eatToken(.colon) orelse return .none;
-    const next_token = try p.expectToken(.identifier);
+    const next_token = p.expectToken(.identifier) catch return .none;
     return .fromToken(next_token);
 }
 
@@ -3356,7 +3356,7 @@ fn parseBlockLabel(p: *Parse) ?TokenIndex {
 /// FieldInit <- DOT IDENTIFIER EQUAL Expr
 fn parseFieldInit(p: *Parse) !?Node.Index {
     if (p.eatTokens(&.{ .period, .identifier, .equal })) |_| {
-        return try p.expectExpr();
+        return p.expectExpr() catch return null;
     }
     return null;
 }
