@@ -41,12 +41,12 @@ pub const ByteOffset = u32;
 pub const TokenInfo = struct {
     tag: Token.Tag,
     start: ByteOffset,
-    /// blank chars
-    blanks: u16,
-    /// Is first on a given line
-    is_first: bool,
-    /// Only used for {l|r}_brace, set to it's matching {l|r}_brace index whithin TokenList; 0 == no match
-    matching_brace_idx: u32 = 0,
+    // blank chars
+    // blanks: u16,
+    // Is first on a given line
+    // is_first: bool,
+    // Only used for {l|r}_brace, set to it's matching {l|r}_brace index whithin TokenList; 0 == no match
+    // matching_brace_idx: u32 = 0,
 };
 
 pub const TokenList = std.MultiArrayList(TokenInfo);
@@ -232,8 +232,8 @@ pub fn createFromBytesArray(gpa: Allocator, bytes: std.ArrayList(u8), kind: Kind
         try tokens.append(gpa, .{
             .tag = token.tag,
             .start = @intCast(token.loc.start),
-            .blanks = token.indent,
-            .is_first = token.is_first,
+            // .blanks = token.indent,
+            // .is_first = token.is_first,
         });
         if (token.tag == .eof) break;
     }
@@ -269,7 +269,7 @@ pub fn createFromBytesArray(gpa: Allocator, bytes: std.ArrayList(u8), kind: Kind
     const errors = try parser.errors.toOwnedSlice(gpa);
     errdefer gpa.free(errors);
 
-    var ast: Ast = .{
+    const ast: Ast = .{
         .gpa = gpa,
         .bytes = bytes,
         .source = source,
@@ -283,10 +283,10 @@ pub fn createFromBytesArray(gpa: Allocator, bytes: std.ArrayList(u8), kind: Kind
         .states = parser.states,
     };
 
-    if (mode != .standard and errors.len == 0) {
-        try ast.markMatchingBraces(gpa, 0, @intCast(tokens.len));
-        ast.initial_brace_matching_done = true;
-    }
+    // if (mode != .standard and errors.len == 0) {
+    //     try ast.markMatchingBraces(gpa, 0, @intCast(tokens.len));
+    //     ast.initial_brace_matching_done = true;
+    // }
 
     return ast;
 }
@@ -520,8 +520,8 @@ fn updateTokens(
         try new_tokens.append(ast.gpa, .{
             .tag = token.tag,
             .start = @as(u32, @intCast(token.loc.start)),
-            .blanks = token.indent,
-            .is_first = token.is_first,
+            // .blanks = token.indent,
+            // .is_first = token.is_first,
         });
     }
 
@@ -556,12 +556,13 @@ fn updateTokens(
     }
 
     // fix up corresponding mbis for the unmodified tokens
-    if (tokens_delta.op != .nop) for (tokens.items(.matching_brace_idx)) |*mbi| {
-        const cti = mbi.*;
-        if (cti != 0 and cti > result.tok_idx_hi) {
-            if (tokens_delta.op == .add) mbi.* += tokens_delta.value else mbi.* -= tokens_delta.value;
-        }
-    };
+    // NTS: Check if valid first?
+    // if (tokens_delta.op != .nop) for (tokens.items(.matching_brace_idx)) |*mbi| {
+    //     const cti = mbi.*;
+    //     if (cti != 0 and cti > result.tok_idx_hi) {
+    //         if (tokens_delta.op == .add) mbi.* += tokens_delta.value else mbi.* -= tokens_delta.value;
+    //     }
+    // };
 
     // TODO find prev known mbr_idx starting with result.tok_idx_lo, and then markMatchingBraces on the subrange
 
@@ -694,10 +695,10 @@ fn recreateNodes(ast: *Ast) Allocator.Error!void {
     ast.*.errors = errors;
     ast.*.states = parser.states;
 
-    if (ast.mode != .standard and errors.len == 0) {
-        try ast.markMatchingBraces(gpa, 0, @intCast(ast.tokens.len));
-        ast.initial_brace_matching_done = true;
-    }
+    // if (ast.mode != .standard and errors.len == 0) {
+    //     try ast.markMatchingBraces(gpa, 0, @intCast(ast.tokens.len));
+    //     ast.initial_brace_matching_done = true;
+    // }
 }
 
 pub fn markMatchingBraces(
