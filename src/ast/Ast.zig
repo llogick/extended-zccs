@@ -347,10 +347,10 @@ fn replaceMalRange(
 
     var dst_slices = dst_mal.slice();
     const src_slices = src_mal.slice();
-    const fields = std.meta.fields(Elem);
+    const fields_count = comptime std.meta.fieldNames(Elem).len;
 
     if (len == src_mal.len) {
-        inline for (fields, 0..) |_, field_index| {
+        inline for (0..fields_count) |field_index| {
             const dst_field_slice = dst_slices.items(@enumFromInt(field_index));
             const src_field_slice = src_slices.items(@enumFromInt(field_index));
             @memcpy(dst_field_slice[start..][0..src_field_slice.len], src_field_slice);
@@ -360,7 +360,7 @@ fn replaceMalRange(
         const prev_len = dst_slices.len;
         // std.log.debug("mal xtra_len: {}, prev_len: {}", .{ xtra_len, prev_len });
         dst_slices.len += xtra_len;
-        inline for (fields, 0..) |_, field_index| {
+        inline for (0..fields_count) |field_index| {
             const dst_field_slice = dst_slices.items(@enumFromInt(field_index));
             const src_field_slice = src_slices.items(@enumFromInt(field_index));
             @memmove(dst_field_slice[start + len + xtra_len ..], dst_field_slice[start + len .. prev_len]);
@@ -369,7 +369,7 @@ fn replaceMalRange(
         }
     } else {
         const shrink_len = len - src_mal.len;
-        inline for (fields, 0..) |_, field_index| {
+        inline for (0..fields_count) |field_index| {
             const dst_field_slice = dst_slices.items(@enumFromInt(field_index));
             const src_field_slice = src_slices.items(@enumFromInt(field_index));
             @memcpy(dst_field_slice[start..][0..src_mal.len], src_field_slice);
@@ -816,17 +816,17 @@ pub fn extraDataSliceWithLen(tree: Ast, start: ExtraIndex, len: u32, comptime T:
 }
 
 pub fn extraData(tree: Ast, index: ExtraIndex, comptime T: type) T {
-    const fields = std.meta.fields(T);
+    const info = @typeInfo(T).@"struct";
     var result: T = undefined;
-    inline for (fields, 0..) |field, i| {
-        @field(result, field.name) = switch (field.type) {
+    inline for (info.field_names, info.field_types, 0..) |field_name, field_type, i| {
+        @field(result, field_name) = switch (field_type) {
             Node.Index,
             Node.OptionalIndex,
             OptionalTokenIndex,
             ExtraIndex,
             => @enumFromInt(tree.extra_data[@intFromEnum(index) + i]),
             TokenIndex => tree.extra_data[@intFromEnum(index) + i],
-            else => @compileError("unexpected field type: " ++ @typeName(field.type)),
+            else => @compileError("unexpected field type: " ++ @typeName(field_type)),
         };
     }
     return result;
