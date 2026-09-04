@@ -2,7 +2,7 @@
     .name = .extended_zccs,
     .version = "0.17.0-dev",
     .fingerprint = 0xbebc9980369446cc, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.17.0-dev.1435+69a26976e",
+    .minimum_zig_version = "0.17.0-dev.2015+3fdcbc03d",
     .dependencies = .{},
     .paths = .{
         "build.zig",
