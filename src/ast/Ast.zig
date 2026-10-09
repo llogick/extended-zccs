@@ -165,11 +165,13 @@ pub fn toStdAst(self: *Ast) std.zig.Ast {
             .ptrs = self.tokens.ptrs[0..2].*,
             .len = self.tokens.len,
             .capacity = self.tokens.capacity,
+            .pointer_stability = .{},
         },
         .nodes = .{
             .ptrs = self.nodes.ptrs,
             .len = self.nodes.len,
             .capacity = self.nodes.capacity,
+            .pointer_stability = .{},
         },
         .extra_data = self.xtra_data.items[0..],
         .errors = @ptrCast(self.errors),
