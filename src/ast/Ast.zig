@@ -581,8 +581,7 @@ pub fn update(
 ) Allocator.Error!void {
     ast.source = ast.bytes.items[0 .. ast.bytes.items.len - 1 :0];
     if (try ast.updateTokens(prev_bytes_len, bytes_idx_lo, bytes_idx_hi)) |affected_indices| {
-        // std.log.debug("{any}", .{result});
-        if (ast.kind == .zig) reuse: {
+        if (false and ast.kind == .zig) reuse: {
             // if (!ast.initial_brace_matching_done) try reuseRootDecls else try doComplexReparse();
             if (!(try ast.reuseRootDecls(affected_indices))) break :reuse;
             return;
@@ -595,7 +594,6 @@ pub fn update(
 }
 
 fn reuseRootDecls(ast: *Ast, indices: AffectedIndices) Allocator.Error!bool {
-    // if (true) return false;
     if (ast.*.states.items.len < 2) return false; // Nothing to reuse
     const root_decl_idx = for (ast.*.states.items, 0..) |state, root_decl_idx| {
         const aft = state.range.aft;
